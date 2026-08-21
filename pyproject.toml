@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frida-toolsmith"
+version = "1.0.0"
+description = "Describe a command-line tool, get a working one. A terminal toolsmith with no GUI anywhere in it."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Luka" }]
+keywords = ["cli", "codegen", "agent", "terminal", "toolsmith", "linux"]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Code Generators",
+]
+dependencies = []
+
+[project.optional-dependencies]
+analysis = ["ruff"]
+freeze = ["pyinstaller"]
+
+[project.urls]
+Homepage = "https://github.com/the-priest/frida"
+
+[project.scripts]
+frida = "frida.main:run"
+
+[tool.setuptools]
+packages = ["frida"]
