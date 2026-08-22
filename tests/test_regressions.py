@@ -565,6 +565,133 @@ check("adding a turn does not rewrite the earlier prompt (cache stays warm)",
       prefix_before[:-1] == prefix_after[:-1])
 
 print()
+print("== a thinking model must not look like a hung one ==")
+
+# DeepSeek V4 Flash 0731 and friends emit tens of thousands of reasoning tokens
+# before one character of code. The live preview only ever drew `content`, so
+# the board froze for the whole think and a working build was indistinguishable
+# from a crash. The user pressed ctrl-C, reasonably.
+import json as _json                                     # noqa: E402
+import threading as _th                                  # noqa: E402
+import time as _time                                     # noqa: E402
+from http.server import BaseHTTPRequestHandler, HTTPServer  # noqa: E402
+
+_THINK = "Considering the physics. " * 200
+_CODE = "```python\nprint('hi')\n```"
+
+
+class _Reasoner(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for i in range(0, len(_THINK), 300):
+            self._send({"choices": [{"delta": {"reasoning_content": _THINK[i:i + 300]}}]})
+            _time.sleep(0.04)
+        for i in range(0, len(_CODE), 12):
+            self._send({"choices": [{"delta": {"content": _CODE[i:i + 12]}}]})
+            _time.sleep(0.04)
+        self._send({"choices": [{"delta": {}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 9000}})
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _send(self, obj):
+        self.wfile.write(b"data: " + _json.dumps(obj).encode() + b"\n\n")
+        self.wfile.flush()
+
+
+_srv = HTTPServer(("127.0.0.1", 0), _Reasoner)
+_th.Thread(target=_srv.serve_forever, daemon=True).start()
+engine.PROVIDERS["groq"].update(
+    url="http://127.0.0.1:%d/v1/chat/completions" % _srv.server_address[1],
+    models_url="", models=["fake"])
+engine.STATE.update(provider="groq")
+engine.STATE["keys"]["groq"] = "k"
+engine.STATE["models"]["groq"] = "fake"
+
+_board = ui.TaskBoard("", ["Write it"])
+_board.start("Write it", "thinking")
+_updates = []
+_real_preview, _real_detail = _board.set_preview, _board.set_detail
+_board.set_preview = lambda t, keep=8, label="": (_updates.append(("preview", label)),
+                                                  _real_preview(t, keep, label))[1]
+_board.set_detail = lambda d: (_updates.append(("detail", d)), _real_detail(d))[1]
+
+with engine.watching_generation(agent._previewer(_board)):
+    _res = engine.call_model([{"role": "user", "content": "go"}],
+                             provider_id="groq", tier="build")
+_srv.shutdown()
+
+check("the stream completed", bool(_res.get("reply")), str(_res.get("error")))
+check("the board updated while the model was only thinking",
+      len(_updates) > 4, "%d updates" % len(_updates))
+check("the thinking was labelled as thinking",
+      any(k == "preview" and lab == "thinking" for k, lab in _updates))
+check("a thinking-token count was shown",
+      any(k == "detail" and "thinking" in d for k, d in _updates))
+check("the code still showed once it started",
+      any(k == "preview" and lab == "" for k, lab in _updates))
+
+# Two writers used to own the detail line, alternating every tick — and the
+# older one counted only content, so it read "0 words written" all through.
+check("only the previewer writes the detail line while it is attached",
+      not any(k == "detail" and "words written" in d for k, d in _updates),
+      str([d for k, d in _updates if k == "detail"][:3]))
+
+print()
+print("== the checklist must not tick work it did not finish ==")
+
+_b = ui.TaskBoard("", ["Plan", "Write it", "Read"])
+_b.show()
+_b.finish("Plan", "done")
+_b.start("Write it", "writing")
+_b.close()
+_states = {t["text"]: t["status"] for t in _b.tasks}
+check("an interrupted step is not marked done",
+      _states["Write it"] != _b.DONE, _states["Write it"])
+check("...it says it stopped",
+      _b.tasks[1]["note"] == "stopped", _b.tasks[1]["note"])
+check("a genuinely finished step is still done", _states["Plan"] == _b.DONE)
+
+# set_stage ran on every previewer tick and restarted the clock each time, so
+# the elapsed counter was pinned at 0s — the one number proving it's alive.
+_b2 = ui.TaskBoard("", ["Write it"])
+_b2.start("Write it", "writing it")
+_first = _b2.stage_started
+_time.sleep(0.05)
+_b2.set_stage("writing it")
+check("re-setting the same stage does not restart the clock",
+      _b2.stage_started == _first)
+_b2.set_stage("something else")
+check("a genuinely new stage does restart it", _b2.stage_started != _first)
+
+print()
+print("== thinking budget ==")
+
+check("plain V4 Flash is the default, not the reasoning revision",
+      engine.MODEL_TIERS["siliconflow"]["build"] == "deepseek-ai/DeepSeek-V4-Flash")
+check("the reasoning revision is still reachable",
+      "deepseek-ai/DeepSeek-V4-Flash-0731" in engine.PROVIDERS["siliconflow"]["models"])
+check("preferred picks plain Flash when both are offered",
+      engine.preferred_model("siliconflow",
+                             ["deepseek-ai/DeepSeek-V4-Flash-0731",
+                              "deepseek-ai/DeepSeek-V4-Flash"])
+      == "deepseek-ai/DeepSeek-V4-Flash")
+
+for arg, want in [("off", 0), ("2000", 2000), ("auto", None)]:
+    commands.h_think(type("F", (), {"tool": agent.Tool(), "provider": None,
+                                    "busy": False})(), arg)
+    check(f"/think {arg} sets the budget", engine.STATE.get("thinking") == want,
+          repr(engine.STATE.get("thinking")))
+engine.STATE["thinking"] = None
+
+print()
 if FAILURES:
     print(f"something failed: {len(FAILURES)}")
     for f_ in FAILURES:

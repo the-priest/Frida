@@ -696,6 +696,40 @@ def h_uninstall(f, arg):
     return None
 
 
+@command("think", "how much the model may think before writing", group="session",
+         arg="[off|N|auto]", free_text=True)
+def h_think(f, arg):
+    want = arg.strip().lower()
+    current = engine.STATE.get("thinking")
+    if not want:
+        now = ("off" if current == 0 else
+               "auto — the model decides" if current is None else "%s tokens" % current)
+        ui.blank()
+        ui.out("  " + ui.c("cream", "thinking: ", bold=True) + ui.c("amber", now))
+        ui.blank()
+        ui.note("/think off    fastest — code starts arriving immediately")
+        ui.note("/think 2000   a short think, then write")
+        ui.note("/think auto   let the model decide (can be tens of thousands)")
+        ui.blank()
+        ui.note("only some models take this; the rest ignore it")
+        ui.blank()
+        return None
+    if want in ("auto", "default"):
+        engine.STATE["thinking"] = None
+    elif want in ("off", "none", "0", "no"):
+        engine.STATE["thinking"] = 0
+    elif want.isdigit():
+        engine.STATE["thinking"] = max(0, min(64000, int(want)))
+    else:
+        ui.err("say: /think off, /think 2000, or /think auto")
+        return None
+    engine.persist_state()
+    value = engine.STATE["thinking"]
+    ui.ok("thinking: " + ("off" if value == 0 else
+                          "auto" if value is None else "%d tokens" % value))
+    return None
+
+
 @command("model", "choose the model", group="session")
 def h_model(f, arg):
     from . import main as _main

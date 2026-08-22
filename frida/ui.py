@@ -608,9 +608,14 @@ class TaskBoard:
         return None
 
     def set_stage(self, stage, detail=""):
+        # Only restart the clock when the stage actually changes. The live
+        # previewer calls this on every tick, and resetting stage_started each
+        # time pinned the elapsed counter at "0s" — the one number that tells
+        # you a long generation is still moving.
+        if stage != self.stage:
+            self.stage_started = time.time()
         self.stage = stage
         self.detail = detail
-        self.stage_started = time.time()
 
     def set_detail(self, detail):
         self.detail = detail
@@ -696,7 +701,12 @@ class TaskBoard:
         self._running = False
         for t in self.tasks:
             if t["status"] == self.ACTIVE:
-                t["status"] = self.DONE
+                # This used to mark the step DONE — a green tick on work that
+                # was interrupted or that crashed. A checklist that ticks a step
+                # it did not finish is worse than no checklist.
+                t["status"] = self.SKIPPED
+                if not t["note"]:
+                    t["note"] = "stopped"
         self.stage = ""
         self.detail = ""
         self.preview = []

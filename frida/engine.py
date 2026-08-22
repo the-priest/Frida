@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -353,8 +353,8 @@ PROVIDERS = {
         # strongest coding model on this provider (93.5% LiveCodeBench). Flash sits
         # right behind it and does all the cheap auxiliary work: see MODEL_TIERS.
         "models": [
-            "deepseek-ai/DeepSeek-V4-Flash-0731",
             "deepseek-ai/DeepSeek-V4-Flash",
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
             "deepseek-ai/DeepSeek-V4-Pro",
             "deepseek-ai/DeepSeek-V3",
             "Qwen/Qwen2.5-72B-Instruct",
@@ -432,8 +432,8 @@ DEFAULT_MODEL_BY_PROVIDER = {
 # harder build work just picks it there and, as of this version, that choice
 # actually sticks. (Google/Groq unchanged — different model families.)
 MODEL_TIERS = {
-    "siliconflow": {"build": "deepseek-ai/DeepSeek-V4-Flash-0731",
-                    "cheap": "deepseek-ai/DeepSeek-V4-Flash-0731"},
+    "siliconflow": {"build": "deepseek-ai/DeepSeek-V4-Flash",
+                    "cheap": "deepseek-ai/DeepSeek-V4-Flash"},
     "novita":      {"build": "deepseek/deepseek-v4-flash",
                     "cheap": "deepseek/deepseek-v4-flash"},
     "google":      {"build": "gemini-2.5-pro", "cheap": "gemini-2.5-flash"},
@@ -451,9 +451,16 @@ MODEL_TIERS = {
 # again. Pro is stronger in the abstract and roughly 5x the price; Flash 0731
 # beats it on the tight edit loop that dominates Frida's token spend.
 PREFERRED = {
+    # Plain Flash first, deliberately. The 0731 revision is re-post-trained for
+    # agentic work and is genuinely better at planning — but it is a REASONING
+    # model: it spends tens of thousands of tokens thinking before it emits a
+    # character of code. For a workshop you sit in front of, watching the file
+    # get written is most of the feedback, and a minute of silence before it
+    # starts is a worse tool even when the output is marginally better.
+    # /think turns it on for people who want it.
     "siliconflow": [
-        "deepseek-ai/DeepSeek-V4-Flash-0731",
         "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Flash-0731",
         "deepseek-ai/DeepSeek-V4-Pro",
         "deepseek-ai/DeepSeek-V3",
     ],
@@ -626,6 +633,9 @@ STATE = {
     "models": load_config().get("models", {}),   # {provider_id: chosen_model}
     "theme": load_config().get("theme", "ember"),
     "big": load_config().get("big", False),
+    # None = don't send the field at all (the model's own default).
+    # 0 = ask for no thinking. A number = cap the thinking tokens.
+    "thinking": load_config().get("thinking", None),
 }
 
 # Set from --theme / --model, which apply to one run and must never be written
@@ -653,7 +663,8 @@ def persist_state():
         theme = load_config().get("theme", "ember")
     return save_config({"keys": STATE["keys"], "provider": STATE["provider"],
                         "models": models, "theme": theme,
-                        "big": bool(STATE.get("big"))})
+                        "big": bool(STATE.get("big")),
+                        "thinking": STATE.get("thinking")})
 
 # --------------------------------------------------------------------------
 # LIVE MODEL CATALOG  -- ask each provider what YOUR key can actually call
@@ -1291,6 +1302,7 @@ def _http_post_stream(url, headers, body, idle_timeout=None, total_timeout=None,
     content, reasoning = [], []
     usage, finish = {}, None
     saw_event = False
+    saw_content = [False]
     raw_body = []
     started = time.time()
     last_tick = 0.0
@@ -1333,15 +1345,27 @@ def _http_post_stream(url, headers, body, idle_timeout=None, total_timeout=None,
                     finish = ch["finish_reason"]
             if on_progress:
                 now = time.time()
+                # The moment the first real character arrives after a long
+                # think is the moment worth showing promptly — waiting up to a
+                # quarter second more to draw the handover wastes the only
+                # interesting transition in the whole generation.
+                first_content = bool(content) and not saw_content[0]
+                if first_content:
+                    saw_content[0] = True
+                    last_tick = 0.0
                 # Four ticks a second when something is actually drawing the text
                 # (the live code preview), one a second when it's only a counter.
+                # A reasoning model can emit tens of thousands of thinking
+                # tokens before one character of content. If the tick only ran
+                # for content the screen sat frozen the whole time.
                 every = 0.25 if GEN_WATCHER[0] else 1.0
                 if now - last_tick >= every:
                     last_tick = now
                     try:
                         on_progress(sum(len(x) for x in content),
                                     sum(len(x) for x in reasoning),
-                                    now - started, "".join(content))
+                                    now - started, "".join(content),
+                                    "".join(reasoning))
                     except Exception:
                         pass
 
@@ -1812,7 +1836,7 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
     total_timeout = MODEL_TIMEOUT.get(tier, MODEL_TIMEOUT["cheap"])
     model = None                     # bound by the loop; referenced by _post below
 
-    def _progress(nchars, nreason, elapsed, text=""):
+    def _progress(nchars, nreason, elapsed, text="", reasoning=""):
         # Live feedback while the model writes. This is what turns "the spinner
         # has been going for two minutes, is it dead?" into a visible word count,
         # and it keeps the SSE relay's idle watchdog fed for the whole generation.
@@ -1821,7 +1845,7 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
         watcher = GEN_WATCHER[0]
         if watcher:
             try:
-                watcher(text, nchars, elapsed)
+                watcher(text, nchars, elapsed, reasoning, nreason)
             except Exception:
                 pass
 
@@ -1839,6 +1863,20 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
                 want_usage=(pid, model, "stream_options") not in _UNSUPPORTED_FIELDS)
         except urllib.error.HTTPError as he:
             det = _err_detail(he).lower()
+            if he.code in (400, 404, 422, 501) and "thinking_budget" in det:
+                # This gateway or model doesn't take the field. Remember it and
+                # retry without, rather than failing the build over a setting.
+                _UNSUPPORTED_FIELDS.add((pid, model, "thinking_budget"))
+                b.pop("thinking_budget", None)
+                return _post_once(b)
+            if he.code == 400 and "reasoning_content" in det:
+                # Some V4 deployments in thinking mode demand the previous
+                # turn's reasoning_content back. Frida doesn't keep it (it is
+                # not part of the file, and storing it would bloat every
+                # session), so ask for no thinking instead of dying.
+                _UNSUPPORTED_FIELDS.add((pid, model, "thinking_budget"))
+                b["thinking_budget"] = 0
+                return _post_once(b)
             if he.code in (400, 404, 422, 501) and "stream_options" in det:
                 _UNSUPPORTED_FIELDS.add((pid, model, "stream_options"))
                 return _post_once(b)
@@ -1932,6 +1970,12 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
                 "Accept": "application/json",
             }
             body = {"model": model, "temperature": temperature, "messages": messages}
+            budget = STATE.get("thinking")
+            if budget is not None and (pid, model, "thinking_budget") not in _UNSUPPORTED_FIELDS:
+                # SiliconFlow's control for hybrid reasoning models. If a
+                # gateway rejects it, the 400 handler below remembers that and
+                # the next attempt goes without it.
+                body["thinking_budget"] = int(budget)
             cap = max_tokens or MAX_TOKENS.get(tier)
             if cap and (pid, model, "max_tokens") not in _UNSUPPORTED_FIELDS:
                 body["max_tokens"] = cap

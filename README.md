@@ -98,17 +98,31 @@ Five providers, all OpenAI-compatible:
 
 | | key | default model |
 |---|---|---|
-| SiliconFlow *(default)* | `SILICONFLOW_API_KEY` | `deepseek-ai/DeepSeek-V4-Flash-0731` |
+| SiliconFlow *(default)* | `SILICONFLOW_API_KEY` | `deepseek-ai/DeepSeek-V4-Flash` |
 | Z.ai | `ZAI_API_KEY` | `glm-5.3` |
 | Groq | `GROQ_API_KEY` | best available |
 | Google AI Studio | `GOOGLE_API_KEY` | `gemini-2.5-pro` |
 | Novita | `NOVITA_API_KEY` | `deepseek/deepseek-v4-flash` |
 
-Frida wants **DeepSeek V4 Flash 0731** on SiliconFlow: same architecture as the
-original V4 Flash, re-post-trained for agentic work — which is exactly this
-program's whole day, reading a file, patching it, reading the failure, patching
-again. Pro is stronger in the abstract and several times the price; Flash wins
-the tight edit loop that dominates the spend.
+Frida defaults to plain **DeepSeek V4 Flash** on SiliconFlow, and that is a
+deliberate choice over the newer `0731` revision. 0731 is re-post-trained for
+agentic work and plans better — but it is a *reasoning* model: it spends tens of
+thousands of tokens thinking before it emits a character of code. In a workshop
+you sit in front of, watching the file get written is most of the feedback, and
+a minute of silence beforehand makes a better model into a worse tool.
+
+Both are one `/model` away, and `/think` controls the budget where the provider
+honours it:
+
+```
+/think off     fastest — code starts arriving immediately
+/think 2000    a short think, then write
+/think auto    let the model decide
+```
+
+When a model does think, you see it think — the reasoning streams into the
+checklist with a running token count, and the moment the first real character
+of code arrives the view switches to the file.
 
 The preference is a ranked list matched against what the provider actually
 offers, not a hardcoded id — so if `0731` isn't on your account yet it falls to
@@ -170,6 +184,7 @@ is a command, and commands do exactly one predictable thing:
 | `/uninstall` | take the command back off your PATH |
 | `/resume` `/new` `/tools` `/rename` | sessions and history |
 | `/theme` `/big` | how it looks |
+| `/think` | how long the model may think before writing |
 | `/model` `/key` `/cost` `/doctor` | settings, spend, and this machine |
 
 The slash is optional at the main prompt: a bare word that names a command

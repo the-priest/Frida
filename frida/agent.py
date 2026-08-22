@@ -54,29 +54,59 @@ _FENCE = re.compile(r"^[ \t]*```[^\n]*\n", re.M)
 
 
 def _previewer(board):
-    """Feed the board the tail of the code as the model writes it.
+    """Show what the model is doing, whatever it happens to be doing.
 
-    The model answers in markdown, so during a build the interesting part is
-    inside a fence and the prose around it is not. Showing the fence markers
-    and the chatter would make this noise; showing the code makes it a window.
+    Two different things can arrive on the wire. Reasoning models spend a long
+    time — sometimes tens of thousands of tokens — emitting `reasoning_content`
+    before a single character of code. This only ever drew `content`, so during
+    that whole stretch the board showed nothing at all and a working build was
+    indistinguishable from a hung one. Now the thinking is shown too, and the
+    handover to code is visible.
     """
-    def show(text, chars, secs):
+    def show(text, chars, secs, reasoning="", rchars=0):
+        rate = int(chars / max(0.5, secs))
+        fence = _FENCE.search(text)
+
+        if not text.strip() and reasoning:
+            # Still thinking. Show the tail of it — it is the most reassuring
+            # thing on the screen, and often genuinely interesting.
+            board.set_stage("thinking it through")
+            board.set_detail("%s thinking tokens  ·  %ds" % (f"{rchars // 4:,}", secs))
+            tail = " ".join(reasoning.split())[-600:]
+            board.set_preview(_rewrap(tail), keep=4, label="thinking")
+            return
+
         body = text
-        # Anchor on a fence that STARTS a line. Matching any ``` meant a set of
-        # backticks in the model's preamble — or inside the tool's own help
-        # text — froze the preview for the rest of the build.
-        m = _FENCE.search(text)
-        if m:
-            body = text[m.end():]
+        if fence:
+            body = text[fence.end():]
             close = _FENCE.search(body)
             if close:
                 body = body[:close.start()]
         elif len(text) < 40:
             return                       # nothing worth showing yet
-        rate = int(chars / max(0.5, secs))
-        board.set_detail("%s chars  ·  %s/s" % (f"{chars:,}", f"{rate:,}"))
+
+        board.set_stage("writing it")
+        detail = "%s chars  ·  %s/s" % (f"{chars:,}", f"{rate:,}")
+        if rchars:
+            detail = "%s thinking  ·  " % f"{rchars // 4:,}" + detail
+        board.set_detail(detail)
         board.set_preview(body, keep=8)
     return show
+
+
+def _rewrap(text, cols=None):
+    """Break a wall of prose into short lines the board can show."""
+    cols = cols or max(24, ui.width() - 14)
+    words, lines, cur = text.split(), [], ""
+    for w in words:
+        if len(cur) + 1 + len(w) > cols:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = (cur + " " + w) if cur else w
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines)
 
 
 class Tool:
@@ -270,11 +300,24 @@ class Frida:
             if kind == "result":
                 result = ev.get("result") or result
             elif kind == "gen":
+                # Two things used to write this same line: this handler and the
+                # live previewer, alternating every tick. Worse, this one counts
+                # only CONTENT — so against a reasoning model it sat on
+                # "0 words written" for the whole think while the previewer's
+                # useful line was overwritten. The previewer owns the line when
+                # it is attached; this is the fallback for when it isn't.
+                if engine.GEN_WATCHER[0] is not None:
+                    continue
                 chars = ev.get("chars") or 0
                 reasoning = ev.get("reasoning") or 0
-                bits = [f"{chars // 5} words written"]
-                if reasoning:
-                    bits.append(f"{reasoning // 5} thinking")
+                if chars:
+                    bits = [f"{chars // 5} words written"]
+                elif reasoning:
+                    bits = [f"{reasoning // 4:,} thinking tokens"]
+                else:
+                    bits = ["waiting for the first token"]
+                if reasoning and chars:
+                    bits.append(f"{reasoning // 4:,} thinking")
                 board.set_detail("  ·  ".join(bits))
             elif kind == "stage":
                 board.set_detail(str(ev.get("text") or "")[:160])
