@@ -40,11 +40,32 @@ def _clean_name(name):
 # ==========================================================================
 # INSTALL  --  the whole point
 # ==========================================================================
-def install(code, name):
-    """Drop the tool on the PATH as an executable command. Returns a dict."""
+def is_ours(path):
+    """Was this file put here by Frida? Decided by the marker line, not the name."""
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return False
+        return MARKER in p.open("r", encoding="utf-8", errors="replace").read(400)
+    except OSError:
+        return False
+
+
+def install(code, name, overwrite=False):
+    """Drop the tool on the PATH as an executable command. Returns a dict.
+
+    Refuses to clobber a file it did not write. The tool's name is chosen by a
+    model, so `ls`, `grep` or `serve` are entirely possible — and this used to
+    overwrite whatever was already there, silently and unrecoverably.
+    """
     name = _clean_name(name)
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     target = BIN_DIR / name
+
+    if target.exists() and not overwrite and not is_ours(target):
+        return {"ok": False, "occupied": str(target), "name": name,
+                "error": "%s already exists in %s and Frida didn't put it there"
+                         % (name, BIN_DIR)}
 
     body = code if code.startswith("#!") else "#!/usr/bin/env python3\n" + code
     # One marker line, right after the shebang. It is what makes `frida tools`

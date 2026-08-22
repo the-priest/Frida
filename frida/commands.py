@@ -104,7 +104,10 @@ def resolve(line):
 
     # Forced instruction — the escape hatch for "run" as English.
     if line[0] in ">":
-        return SAY, line[1:].strip(), ""
+        forced = line[1:].strip()
+        # A bare ">" used to reach say() as an empty instruction: two paid
+        # calls, and the tool replaced by whatever came back.
+        return (SAY, forced, "") if forced else (NOTHING, "", "")
 
     slashed = line.startswith("/")
     body = line[1:].strip() if slashed else line
@@ -178,6 +181,14 @@ def dispatch(f, line):
         return say(f, payload)
 
     cmd = payload
+    # A command typed AT A GATE runs while build() is still on the stack, and
+    # build() re-reads self.tool on every access. /new, /resume and /build all
+    # rebind it — so the in-flight build carried on writing into, version-
+    # bumping and re-installing whatever tool you had just switched to.
+    if getattr(f, "busy", False) and cmd.name in ("build", "new", "resume"):
+        ui.err("/" + cmd.name + " can't run while a build is in progress")
+        ui.note("answer this first, or ctrl-c to stop the build")
+        return None
     if cmd.needs_tool and not f.tool.code:
         ui.err("no tool yet")
         ui.note("describe one first — or /tools to pick up something you built before")
@@ -259,11 +270,13 @@ def h_build(f, arg):
 @command("new", "start a fresh tool", group="make", aliases=("reset",))
 def h_new(f, arg):
     from . import agent
-    if f.tool.code:
+    kept = f.tool.name if f.tool.code else ""
+    if kept:
         f.tool.save()
-        ui.note("kept " + f.tool.name + " — /tools to come back to it")
     f.tool = agent.Tool(f.provider)
     ui.ok("fresh start")
+    if kept:
+        ui.note("kept " + kept + " — /tools to come back to it")
     return None
 
 
@@ -284,21 +297,31 @@ def h_resume(f, arg):
             ui.note("nothing to resume yet")
             return None
         if arg.strip():
-            hit = next((s for s in sessions
+            hit = next((s for s in engine.session_list()
                         if (s.get("name") or "").lower() == arg.strip().lower()), None)
             record = engine.session_load(hit["id"]) if hit else None
         if not record:
+            labels = ["%s  %s" % (str(i).rjust(2), s.get("name") or s["id"])
+                      for i, s in enumerate(sessions, 1)]
             choice = ui.ask("resume which?",
-                            [{"label": s.get("name") or s["id"],
+                            [{"label": lab,
                               "detail": "%s · %s lines · %s" % (
                                   s.get("updated", ""),
                                   s.get("lines", "?"), s["id"])}
-                             for s in sessions], allow_other=False)
-            record = next((engine.session_load(s["id"]) for s in sessions
-                           if (s.get("name") or s["id"]) == choice), None)
+                             for lab, s in zip(labels, sessions)],
+                            allow_other=False)
+            if choice is ui.CANCELLED:
+                ui.note("stayed on " + (f.tool.name if f.tool.code else "nothing"))
+                return None
+            # Match on position, not on the label: two tools with the same
+            # name used to collapse and load whichever came first.
+            idx = labels.index(choice) if choice in labels else -1
+            record = engine.session_load(sessions[idx]["id"]) if idx >= 0 else None
     if not record:
         ui.err("couldn't load that")
         return None
+    if f.tool.code:
+        f.tool.save()               # never drop the tool you were holding
     f.tool = agent.Tool.restore(record, f.provider)
     ui.ok("resumed %s · %d lines · v%s" %
           (f.tool.name, _lines(f.tool.code), f.tool.ver))
@@ -319,8 +342,12 @@ def h_test(f, arg):
     from . import agent
     board = ui.TaskBoard("", [agent.STEP_RUN])
     board.show()
-    result = f.run_for_real(board)
-    board.close()
+    try:
+        result = f.run_for_real(board)
+    finally:
+        # Without this, ctrl-C left Live's 90ms daemon repainting over the
+        # prompt for the rest of the session, with the cursor still hidden.
+        board.close()
     if result.get("blocked"):
         ui.warn(result["blocked"])
     else:
@@ -338,8 +365,10 @@ def h_fix(f, arg):
         return None
     board = ui.TaskBoard("", [agent.STEP_FIX, agent.STEP_READ, agent.STEP_RUN])
     board.show()
-    f.fix_loop(board, run_result=f.tool.last_run)
-    board.close()
+    try:
+        f.fix_loop(board, run_result=f.tool.last_run)
+    finally:
+        board.close()
     return None
 
 
@@ -405,10 +434,22 @@ def h_rename(f, arg):
     if not name:
         ui.err("give it a name: /rename photo-sorter")
         return None
-    old, f.tool.name = f.tool.name, name
+    old = f.tool.name
+    if old == name:
+        ui.note("already called " + name)
+        return None
+    f.tool.name = name
     f.tool.named = True
     f.tool.save()
     ui.ok("%s is now %s" % (old, name))
+    # The old binary used to stay on PATH forever, still running the code from
+    # before the rename, while every later change went to the new name.
+    # installed() returns full paths, not bare names.
+    if any(os.path.basename(p) == ship._clean_name(old) for p in ship.installed()):
+        if ship.install(f.tool.code, name).get("ok") and ship.uninstall(old):
+            ui.note("moved the installed command from %s to %s" % (old, name))
+        else:
+            ui.warn("%s is still on your PATH with the old code" % old)
     return None
 
 
@@ -475,6 +516,13 @@ def h_save(f, arg):
          needs_tool=True)
 def h_install(f, arg):
     res = ship.install(f.tool.code, f.tool.name)
+    if res.get("occupied"):
+        ui.warn(res["error"])
+        ui.note("that file isn't one of Frida's — overwriting it may break something")
+        if not ui.confirm("overwrite it?", default=False):
+            ui.note("try /rename to give the tool a different command name")
+            return None
+        res = ship.install(f.tool.code, f.tool.name, overwrite=True)
     if not res.get("ok"):
         ui.err(res.get("error", "failed"))
         return None
@@ -505,6 +553,40 @@ def h_freeze(f, arg):
 
 
 # ---- session -------------------------------------------------------------
+@command("theme", "change how Frida looks", group="session", arg="[name]",
+         free_text=True)
+def h_theme(f, arg):
+    want = arg.strip().lower()
+    if want in ("", "?", "list"):
+        current = ui.THEME          # the loop below repaints in each theme
+        ui.blank()
+        ui.rule("themes")
+        ui.blank()
+        for name in ui.THEMES:
+            here = name == current
+            ui.set_theme(name)
+            mark = ui.c("lime", ui.G.done) if here else ui.c("faint", " ")
+            ui.out("  %s  %s  %s   %s%s%s%s" % (
+                mark,
+                ui.c("amber", name.ljust(10), bold=True),
+                ui.c("grey", ui.THEME_BLURB.get(name, "")[:28].ljust(29)),
+                ui.c("cream", "text "), ui.c("lime", ui.G.done + " "),
+                ui.c("red", ui.G.fail + " "), ui.c("teal", "tool")))
+        ui.set_theme(current)   # ...and this used to "restore" the last one
+        ui.blank()
+        ui.note("/theme matrix   ·   it sticks between sessions")
+        ui.blank()
+        return None
+    if not ui.set_theme(want):
+        ui.err("no theme called " + want)
+        ui.note("there is: " + ", ".join(ui.THEMES))
+        return None
+    engine.STATE["theme"] = want
+    engine.persist_state()
+    ui.ok("theme: " + want + "  " + ui.c("grey", ui.THEME_BLURB.get(want, "")))
+    return None
+
+
 @command("model", "choose the model", group="session")
 def h_model(f, arg):
     from . import main as _main
@@ -515,8 +597,16 @@ def h_model(f, arg):
 @command("key", "set an API key", group="session")
 def h_key(f, arg):
     from . import main as _main
-    engine.STATE["keys"][engine.STATE["provider"]] = ""
-    _main.ensure_key()
+    pid = engine.STATE["provider"]
+    had = engine.STATE["keys"].get(pid) or ""
+    engine.STATE["keys"][pid] = ""
+    if not _main.ensure_key(force_prompt=True):
+        # They backed out. Put back what was there rather than leaving the
+        # provider keyless because they changed their mind.
+        engine.STATE["keys"][pid] = had
+        engine.STATE["provider"] = pid
+        if had:
+            ui.note("kept your existing " + engine.PROVIDERS[pid]["label"] + " key")
     return None
 
 

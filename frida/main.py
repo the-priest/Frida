@@ -54,20 +54,28 @@ def inherited_keys():
     return found, (data.get("provider") if data.get("provider") in found else None)
 
 
-def ensure_key(interactive=True):
-    """Frida needs one provider key. Find it, inherit it, or ask for it once."""
+def ensure_key(interactive=True, force_prompt=False):
+    """Frida needs one provider key. Find it, inherit it, or ask for it once.
+
+    `force_prompt` is for /key, which means "let me type a key". Without it,
+    /key blanked the current provider's key and then fell straight into the
+    borrow-another-provider's-key branch below: no prompt ever appeared, you
+    were silently moved to a different provider, and the emptied key was
+    written to config.json — the old one gone for good.
+    """
     pid = engine.STATE["provider"]
-    if (engine.STATE["keys"].get(pid) or "").strip():
-        return True
-    for other, key in engine.STATE["keys"].items():
-        if (key or "").strip():
-            engine.STATE["provider"] = other
-            engine.persist_state()
-            ui.info(f"using {engine.PROVIDERS[other]['label']} — it's the key you have")
+    if not force_prompt:
+        if (engine.STATE["keys"].get(pid) or "").strip():
             return True
+        for other, key in engine.STATE["keys"].items():
+            if (key or "").strip():
+                engine.STATE["provider"] = other
+                engine.persist_state()
+                ui.info(f"using {engine.PROVIDERS[other]['label']} — it's the key you have")
+                return True
 
     legacy, preferred = inherited_keys()
-    if legacy:
+    if legacy and not force_prompt:
         labels = ", ".join(engine.PROVIDERS[p]["label"] for p in legacy)
         if not interactive or ui.confirm(f"found a {labels} key in theDawg's config — use it?",
                                          default=True):
@@ -202,6 +210,9 @@ def pick_model(f):
     current = engine.STATE["models"].get(pid)
     options = [{"label": m, "detail": "current" if m == current else ""} for m in models[:12]]
     choice = ui.ask(f"which {engine.PROVIDERS[pid]['label']} model?", options, allow_other=True)
+    if choice is ui.CANCELLED or not str(choice).strip():
+        ui.note("left on " + (current or "the default"))
+        return
     engine.STATE["models"][pid] = choice
     engine.persist_state()
     ui.ok(f"pinned {choice}")
@@ -258,7 +269,7 @@ def repl(f):
     — which is why /help can no longer advertise something that doesn't work.
     """
     hist = commands.install_readline()
-    commands.set_sink_for(f)
+    commands.set_sink_for(f)          # harmless if main() already did it
     ui.note("type an instruction, or /help")
     try:
         while True:
@@ -338,6 +349,10 @@ def build_parser():
     p.add_argument("--model", default=None, metavar="ID", help="pin a model for this run")
     p.add_argument("--json", action="store_true", help="machine-readable output where it applies")
     p.add_argument("--no-banner", action="store_true", help="skip the wordmark")
+    p.add_argument("--theme", default=None, metavar="NAME",
+                   help="ember, matrix, ice, synthwave, paper")
+    p.add_argument("--plain", action="store_true",
+                   help="no animation — same output, nothing moves")
     p.add_argument("--version", action="version", version="frida " + __version__)
     return p
 
@@ -345,14 +360,28 @@ def build_parser():
 # Words that look like subcommands but only exist inside the workshop. Without
 # this, `frida test` quietly builds a tool called "test" — which is exactly the
 # kind of thing that makes a CLI feel untrustworthy.
+# Commands main() handles as real subcommands (`frida code | wc -l`), plus
+# their aliases. Everything else exists only inside a session, and `frida test`
+# must say so rather than building a tool called "test".
+_ALSO_SUBCOMMANDS = ("build", "doctor", "tools", "library", "ls", "resume",
+                     "help", "code", "cost")
 IN_SESSION_ONLY = frozenset(
-    n for n in commands.all_names()
-    if n not in ("build", "doctor", "tools", "resume", "help"))
+    n for n in commands.all_names() if n not in _ALSO_SUBCOMMANDS)
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    ui.set_theme(args.theme or engine.STATE.get("theme") or "ember")
+    if args.plain:
+        ui.set_motion(False)
+    # --theme and --model are documented "for this run". They were written into
+    # STATE, which persist_state() serialises wholesale, so the next /theme or
+    # key prompt quietly made them permanent.
+    engine.RUN_OVERRIDES["theme"] = args.theme or ""
+    if args.theme:
+        engine.STATE["theme"] = args.theme
 
     if args.provider:
         if args.provider not in engine.PROVIDERS:
@@ -362,6 +391,7 @@ def main(argv=None):
         engine.STATE["provider"] = args.provider
     if args.model:
         engine.STATE["models"][engine.STATE["provider"]] = args.model
+        engine.RUN_OVERRIDES["model"] = (engine.STATE["provider"], args.model)
 
     words = list(args.request)
     sub = words[0].lower() if words else ""
@@ -381,6 +411,11 @@ def main(argv=None):
 
     f = agent.Frida(provider=engine.STATE["provider"], auto=args.yes,
                     rounds=args.rounds)
+    # Point every prompt in the program at the dispatcher HERE, not inside
+    # repl(). `frida "a csv tool"` also stops at a question and a plan gate,
+    # and without this a /save typed there was read as plan feedback — the
+    # exact bug the sink exists to prevent, still live on the one-shot path.
+    commands.set_sink_for(f)
 
     if sub == "cost":
         show_cost()
@@ -396,7 +431,7 @@ def main(argv=None):
             return 1
         f.tool = agent.Tool.restore(record, f.provider)
         if not args.no_banner:
-            ui.banner(__version__)
+            ui.boot(__version__)
         ui.ok(f"resumed {f.tool.name} — {len(f.tool.code.splitlines())} lines")
         if not ensure_key():
             return 1
@@ -419,8 +454,8 @@ def main(argv=None):
 
     if request:
         if not args.no_banner:
-            ui.banner(__version__)
-        tool = f.build(request, install=not args.no_install,
+            ui.boot(__version__)
+        tool = f.build(request, verify=not args.no_verify, install=not args.no_install,
                        ask=not args.yes)
         if not tool.code:
             return 1
@@ -432,7 +467,7 @@ def main(argv=None):
         return 0
 
     if not args.no_banner:
-        ui.banner(__version__)
+        ui.boot(__version__)
         ui.tribute()
     return repl(f)
 

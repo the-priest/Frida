@@ -89,18 +89,33 @@ fetch() {  # fetch <url> <dest>
 # --------------------------------------------------------------------------
 mkdir -p "$SHARE/frida" "$BIN"
 
-FILES="frida/__init__.py frida/engine.py frida/prompts.py frida/harness.py \
-frida/ui.py frida/agent.py frida/ship.py frida/main.py bin/frida LICENSE README.md"
+# The list of modules used to be typed out here by hand, and it went stale the
+# moment a new one was added: 2.0 shipped frida/commands.py, the list didn't
+# mention it, and every upgraded install died on `ImportError: cannot import
+# name 'commands'`. A local install now takes whatever is actually in the
+# package directory, so it cannot drift again.
+# MODULES: __init__.py agent.py commands.py engine.py harness.py main.py prompts.py ship.py ui.py
+EXTRAS="bin/frida LICENSE README.md"
 
 if [ -f "$(dirname "$0")/frida/engine.py" ]; then
   # running from a clone
   SRC="$(cd "$(dirname "$0")" && pwd)"
   say "${DIM}  installing from $SRC${OFF}"
-  for f in $FILES; do
+  # Clear out any modules from a previous version that no longer exist, so a
+  # deleted file can't linger and shadow something.
+  rm -f "$SHARE/frida/"*.py
+  for f in "$SRC"/frida/*.py; do
+    [ -e "$f" ] || die "no python files found in $SRC/frida"
+    cp "$f" "$SHARE/frida/$(basename "$f")"
+  done
+  for f in $EXTRAS; do
     mkdir -p "$SHARE/$(dirname "$f")"
     cp "$SRC/$f" "$SHARE/$f"
   done
 else
+  # Fetching over the network can't glob, so this list is checked by the test
+  # suite against the real package directory.
+  FILES="$(sed -n 's/^# MODULES: //p' "$0" | tr ' ' '\n' | sed 's|^|frida/|') $EXTRAS"
   say "${DIM}  fetching from github.com/${REPO_USER}/${REPO_NAME}${OFF}"
   for f in $FILES; do
     mkdir -p "$SHARE/$(dirname "$f")"

@@ -114,6 +114,10 @@ class Sandbox:
 # ==========================================================================
 # ONE RUN
 # ==========================================================================
+# How long to wait for output after SIGKILL before abandoning the pipes.
+KILL_GRACE = 5
+
+
 def _invoke(sandbox, argv, stdin="", timeout=CASE_TIMEOUT, interrupt_after=None):
     """Run the script once. Returns a dict — never raises for a tool's own fault."""
     cmd = [engine.run_python(), str(sandbox.script)] + [str(a) for a in (argv or [])]
@@ -148,7 +152,25 @@ def _invoke(sandbox, argv, stdin="", timeout=CASE_TIMEOUT, interrupt_after=None)
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except Exception:
             proc.kill()
-        out, err = proc.communicate()
+        # This second wait used to have no timeout, and communicate() does not
+        # return until the write ends of the pipes are closed. A generated tool
+        # that leaves a detached grandchild behind — anything calling Popen with
+        # start_new_session, or os.setsid — keeps a pipe open that killpg cannot
+        # reach, and Frida hung here forever. The timeout is the whole point of
+        # this function; it cannot be the thing that blocks.
+        try:
+            out, err = proc.communicate(timeout=KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+            proc.poll()                      # reap if it did die, don't wait
+            out, err = b"", (
+                b"the tool was killed after the timeout, but something it "
+                b"started outlived it and kept the output pipe open, so its "
+                b"output could not be collected")
         timed_out = True
 
     return {

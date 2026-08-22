@@ -50,6 +50,35 @@ STEP_SHIP = "Hand it over"
 # ==========================================================================
 # THE TOOL UNDER CONSTRUCTION
 # ==========================================================================
+_FENCE = re.compile(r"^[ \t]*```[^\n]*\n", re.M)
+
+
+def _previewer(board):
+    """Feed the board the tail of the code as the model writes it.
+
+    The model answers in markdown, so during a build the interesting part is
+    inside a fence and the prose around it is not. Showing the fence markers
+    and the chatter would make this noise; showing the code makes it a window.
+    """
+    def show(text, chars, secs):
+        body = text
+        # Anchor on a fence that STARTS a line. Matching any ``` meant a set of
+        # backticks in the model's preamble — or inside the tool's own help
+        # text — froze the preview for the rest of the build.
+        m = _FENCE.search(text)
+        if m:
+            body = text[m.end():]
+            close = _FENCE.search(body)
+            if close:
+                body = body[:close.start()]
+        elif len(text) < 40:
+            return                       # nothing worth showing yet
+        rate = int(chars / max(0.5, secs))
+        board.set_detail("%s chars  ·  %s/s" % (f"{chars:,}", f"{rate:,}"))
+        board.set_preview(body, keep=8)
+    return show
+
+
 class Tool:
     """Everything Frida knows about the tool it is currently building."""
 
@@ -84,30 +113,48 @@ class Tool:
         if not self.code:
             return
         self.history.append({"ver": self.ver, "code": self.code,
-                             "note": (note or "").strip()[:400]})
+                             "note": (note or "").strip()[:400],
+                             # The conversation is part of the version. Without
+                             # it, /undo restored the code but left the model
+                             # believing the undone version was current — so the
+                             # next full rewrite silently reinstated it.
+                             "turns": len(self.messages)})
         del self.history[:-60]      # keep the last 60; a tool is not a git repo
         self.future.clear()
 
     def previous_code(self):
         return self.history[-1]["code"] if self.history else None
 
+    def _restore(self, snap):
+        self.code, self.ver = snap["code"], snap["ver"]
+        # A history entry records only how many turns the conversation had at
+        # the time (cheap, and truncating is always right going backwards). An
+        # undo/redo entry carries the turns themselves, because stepping
+        # FORWARD has to put back messages that undo dropped.
+        if isinstance(snap.get("messages"), list):
+            self.messages = list(snap["messages"])
+        else:
+            turns = snap.get("turns")
+            if isinstance(turns, int) and 0 <= turns <= len(self.messages):
+                self.messages = self.messages[:turns]
+        self.last_run = None
+        return snap
+
+    def _here(self, note):
+        return {"ver": self.ver, "code": self.code, "note": note,
+                "messages": list(self.messages)}
+
     def undo(self):
         if not self.history:
             return None
-        self.future.append({"ver": self.ver, "code": self.code, "note": "undone"})
-        snap = self.history.pop()
-        self.code, self.ver = snap["code"], snap["ver"]
-        self.last_run = None
-        return snap
+        self.future.append(self._here("undone"))
+        return self._restore(self.history.pop())
 
     def redo(self):
         if not self.future:
             return None
-        self.history.append({"ver": self.ver, "code": self.code, "note": "redone"})
-        snap = self.future.pop()
-        self.code, self.ver = snap["code"], snap["ver"]
-        self.last_run = None
-        return snap
+        self.history.append(self._here("redone"))
+        return self._restore(self.future.pop())
 
     def revert(self, n):
         """Jump to version n as /versions numbers them (1-based, oldest first)."""
@@ -115,9 +162,7 @@ class Tool:
             return None
         target = self.history[n - 1]
         self.snapshot("reverted to v" + target["ver"])
-        self.code, self.ver = target["code"], target["ver"]
-        self.last_run = None
-        return target
+        return self._restore(target)
 
     # ---- versioning -----------------------------------------------------
     def bump(self, kind="patch"):
@@ -283,8 +328,14 @@ class Frida:
         if self.auto:
             board.show()
             return True
-        answer = ui.prompt(ui.G.arrow, "enter to build it · or say what to change",
-                           commands=True)
+        try:
+            answer = ui.prompt(ui.G.arrow, "enter to build it · or say what to change",
+                               commands=True)
+        except EOFError:
+            # `frida "a tool" < /dev/null`, or ctrl-D at the gate. They already
+            # asked for this to be built; proceed rather than traceback.
+            ui.blank()
+            answer = ""
         if answer.strip():
             board.show()
             return answer.strip()
@@ -299,7 +350,10 @@ class Frida:
         board.start(step_label, "thinking")
         t0 = time.time()
         prior = _last_user(self.tool.messages)
+        with engine.watching_generation(_previewer(board)):
+            return self._write_inner(instruction, board, step_label, t0, prior)
 
+    def _write_inner(self, instruction, board, step_label, t0, prior):
         if self.tool.code and not engine._wants_fresh_build(instruction):
             res = self._call_edit(instruction, prior, board)
             if res is None:
@@ -494,6 +548,12 @@ class Frida:
                 result["installed"] = res
                 board.finish(STEP_SHIP, self.tool.name + " on your PATH"
                              if res.get("on_path") else self.tool.name + " installed")
+            elif res.get("occupied"):
+                # Something not ours is already at that name. Don't destroy it,
+                # and don't fail silently — the copy is still on disk.
+                board.finish(STEP_SHIP, "not installed — " + self.tool.name
+                             + " is taken", status=board.SKIPPED)
+                result["occupied"] = res["occupied"]
             else:
                 board.fail(STEP_SHIP, _short(res.get("error", "install failed")))
         else:
@@ -514,13 +574,17 @@ class Frida:
     # ----------------------------------------------------------------------
     # THE WHOLE THING
     # ----------------------------------------------------------------------
-    def build(self, request, install=True, ask=True):
+    def build(self, request, install=True, ask=True, verify=True):
         """Take a sentence, hand back a working command. Returns the Tool."""
         self._attempt = 0
         write_step = "Write it"
         board = ui.TaskBoard("", [STEP_AGREE, STEP_PLAN, write_step, STEP_READ,
                                   STEP_RUN, STEP_FIX, STEP_SHIP])
         board.show()
+        # Commands typed at a question or the plan gate run while this call is
+        # still on the stack; dispatch refuses the ones that would swap the
+        # tool out from under it. See commands.dispatch.
+        self.busy = True
         try:
             if ask:
                 request = self.clarify(request, board)
@@ -546,7 +610,11 @@ class Frida:
 
             passed, report = self.read_code(board)
             result = None
-            if passed:
+            if passed and not verify:
+                # --no-verify. The static read still happens (it is free and
+                # catches syntax errors); only the real run is skipped.
+                board.skip(STEP_RUN, "skipped — you asked me not to run it")
+            elif passed:
                 result = self.run_for_real(board)
                 if result.get("blocked"):
                     board.close()
@@ -573,6 +641,7 @@ class Frida:
             self._closing(built, delivered)
             return self.tool
         finally:
+            self.busy = False
             board.close()
 
     def _closing(self, built, delivered=None):
@@ -581,11 +650,21 @@ class Frida:
             ui.say(reply)
         if delivered and delivered.get("installed"):
             inst = delivered["installed"]
+            ui.sweep("  " + ui.c("lime", ui.G.done + " " + self.tool.name
+                                 + " is ready"), colour="lime")
             ui.file_card(inst["path"], f"{self.tool.name} is installed",
                          run_hint=f"{self.tool.name} --help")
             if not inst.get("on_path"):
                 ui.warn("~/.local/bin isn't on your PATH yet:")
                 ui.note(inst["hint"])
+        elif delivered and delivered.get("occupied"):
+            ui.warn(self.tool.name + " already exists on your PATH and Frida "
+                    "didn't put it there:")
+            ui.note(delivered["occupied"])
+            ui.note("the tool is saved — /rename it, or /install to overwrite")
+            if delivered.get("copy"):
+                ui.file_card(delivered["copy"], "saved",
+                             run_hint="python3 %s --help" % delivered["copy"])
         elif delivered and delivered.get("copy"):
             ui.file_card(delivered["copy"], "saved",
                          run_hint=f"python3 {delivered['copy']} --help")
@@ -612,6 +691,7 @@ class Frida:
         step = "Change it"
         board = ui.TaskBoard("", [step, STEP_READ, STEP_RUN, STEP_FIX, STEP_SHIP])
         board.show()
+        self.busy = True
         try:
             self.tool.pending_bump = "patch"
             built, error = self.write(instruction, board, step)
@@ -641,17 +721,21 @@ class Frida:
             board.close()
             self._closing(built, delivered)
         finally:
+            self.busy = False
+            self.tool.pending_bump = None
             board.close()
 
     def review(self):
         board = ui.TaskBoard("", ["Read it properly"])
         board.show()
-        res = self._call(
-            [{"role": "system", "content": P["review"]},
-             {"role": "user", "content": engine.fenced(self.tool.code)}],
-            board=board, tier="build", stage="reviewing")
-        board.finish(0)
-        board.close()
+        try:
+            res = self._call(
+                [{"role": "system", "content": P["review"]},
+                 {"role": "user", "content": engine.fenced(self.tool.code)}],
+                board=board, tier="build", stage="reviewing")
+            board.finish(0)
+        finally:
+            board.close()
         if res.get("error"):
             ui.err(res["error"])
             return

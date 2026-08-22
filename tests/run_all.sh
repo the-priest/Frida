@@ -16,12 +16,16 @@ echo "== commands =="
 python3 tests/test_commands.py 2>/dev/null || fail=1
 
 echo
+echo "== regressions =="
+python3 tests/test_regressions.py 2>/dev/null || fail=1
+
+echo
 echo "== interactive =="
 python3 tests/test_interactive.py 2>/dev/null || fail=1
 
 echo
 echo "== installer =="
-bash -n install.sh && echo "[PASS] install.sh parses" || { echo "[FAIL] install.sh"; fail=1; }
+bash tests/test_install.sh || fail=1
 
 echo
 if [ "$fail" -eq 0 ]; then echo "all good"; else echo "something failed"; fi

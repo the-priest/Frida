@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import tokenize
+import unicodedata
 
 # ==========================================================================
 # CAPABILITY DETECTION
@@ -51,9 +52,14 @@ def is_tty():
 def _colour_depth():
     if os.environ.get("NO_COLOR") is not None:
         return 0
+    term = (os.environ.get("TERM") or "").lower()
+    # FORCE_COLOR is the convention for "I am piping this somewhere that
+    # understands escapes" — `frida /code | less -R`, a CI log viewer, asciinema.
+    forced = os.environ.get("FORCE_COLOR")
+    if forced not in (None, "", "0"):
+        return {"1": 24, "2": 8, "3": 4}.get(forced, 24)
     if not is_tty():
         return 0
-    term = (os.environ.get("TERM") or "").lower()
     if term in ("dumb", ""):
         return 0
     if (os.environ.get("COLORTERM") or "").lower() in ("truecolor", "24bit"):
@@ -101,6 +107,100 @@ DIM = "\033[2m" if DEPTH else ""
 ITALIC = "\033[3m" if DEPTH else ""
 
 
+# ==========================================================================
+# THEMES
+# ==========================================================================
+# A theme is a full remapping of the ten semantic colour names. Because every
+# call site asks for a role ("amber" = the accent, "lime" = something worked)
+# rather than a colour, swapping the palette re-skins the entire program and no
+# other line of code has to know.
+THEMES = {
+    "ember": {   # Frida's own: warm amber on a dark room, teal for what's live
+        "amber": (232, 163,  61), "gold":   (247, 201, 114),
+        "cream": (238, 229, 214), "teal":   ( 70, 199, 212),
+        "lime":  (159, 224,  74), "red":    (255, 107, 107),
+        "violet":(199, 155, 224), "grey":   (128, 122, 114),
+        "faint": ( 92,  88,  82), "white":  (255, 255, 255),
+    },
+    "matrix": {  # green phosphor, the way a VT220 never actually looked
+        "amber": ( 64, 255, 128), "gold":   (140, 255, 170),
+        "cream": (198, 255, 214), "teal":   (  0, 214, 150),
+        "lime":  (110, 255, 110), "red":    (255,  92,  92),
+        "violet":( 96, 230, 170), "grey":   ( 78, 130,  98),
+        "faint": ( 48,  86,  64), "white":  (235, 255, 240),
+    },
+    "ice": {     # cold blues, easiest on the eyes for a long night
+        "amber": ( 96, 214, 255), "gold":   (150, 226, 255),
+        "cream": (219, 234, 254), "teal":   (122, 162, 247),
+        "lime":  ( 94, 234, 212), "red":    (255, 122, 144),
+        "violet":(167, 160, 255), "grey":   ( 96, 118, 144),
+        "faint": ( 62,  78,  98), "white":  (245, 250, 255),
+    },
+    "synthwave": {  # the loud one. you will not want it every day
+        "amber": (255,  46, 151), "gold":   (255, 154, 210),
+        "cream": (248, 230, 255), "teal":   (  0, 229, 255),
+        "lime":  (124, 247, 196), "red":    (255,  67, 101),
+        "violet":(185, 103, 255), "grey":   (139,  99, 152),
+        "faint": ( 84,  56,  96), "white":  (255, 255, 255),
+    },
+    "paper": {   # for light terminals — inks, not glows
+        "amber": (176,  86,   0), "gold":   (140,  92,  10),
+        "cream": ( 36,  34,  32), "teal":   (  0, 110, 130),
+        "lime":  ( 42, 120,  40), "red":    (176,  32,  48),
+        "violet":(108,  64, 150), "grey":   (100,  96,  92),
+        "faint": (150, 146, 140), "white":  (  0,   0,   0),
+    },
+}
+THEME_BLURB = {
+    "ember": "warm amber · the default",
+    "matrix": "green phosphor",
+    "ice": "cold blues · easiest at 3am",
+    "synthwave": "loud. gloriously loud",
+    "paper": "for light terminals",
+}
+THEME = "ember"
+
+
+def _rgb_to_256(r, g, b):
+    """Nearest xterm-256 index, so themes survive a terminal without truecolor."""
+    if abs(r - g) < 12 and abs(g - b) < 12:          # grey ramp
+        if r < 8:
+            return 16
+        if r > 248:
+            return 231
+        return 232 + round((r - 8) / 247 * 23)
+    return (16 + 36 * round(r / 255 * 5)
+            + 6 * round(g / 255 * 5) + round(b / 255 * 5))
+
+
+def set_theme(name):
+    """Swap the palette. Unknown names leave it alone."""
+    global THEME
+    pal = THEMES.get(name)
+    if not pal:
+        return False
+    THEME = name
+    _RGB.clear()
+    _RGB.update(pal)
+    _256.clear()
+    _256.update({k: _rgb_to_256(*v) for k, v in pal.items()})
+    # ...and the 16-colour table, or `--theme paper` renders its near-black
+    # inks as SGR 37 (white) — invisible on the light terminal it exists for.
+    _16.clear()
+    _16.update({k: _rgb_to_16(*v) for k, v in pal.items()})
+    return True
+
+
+def _rgb_to_16(r, g, b):
+    """Nearest of the 8 ANSI foreground colours (30-37), by hue and lightness."""
+    lo, hi = min(r, g, b), max(r, g, b)
+    if hi - lo < 40:                       # greyish
+        return 37 if hi > 150 else (30 if hi < 60 else 37)
+    bit = (1 if r > (lo + hi) / 2 else 0) | (2 if g > (lo + hi) / 2 else 0) \
+        | (4 if b > (lo + hi) / 2 else 0)
+    return 30 + {1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 0: 7}[bit]
+
+
 def c(name, text, bold=False):
     """Colour `text`. Returns it untouched when colour isn't available."""
     if not DEPTH:
@@ -122,8 +222,47 @@ def plain(text):
     return _ANSI_RE.sub("", text)
 
 
+def cells(text):
+    """How many terminal columns `text` occupies. Wide CJK glyphs take two."""
+    n = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return n
+
+
 def vlen(text):
-    return len(plain(text))
+    return cells(plain(text))
+
+
+def clip(text, limit):
+    """Truncate to `limit` columns, keeping colour codes intact.
+
+    Every in-place redraw in this program assumes one rendered line occupies
+    one terminal row. A line wider than the terminal silently occupies two, the
+    cursor-up count then undershoots, and the display shreds itself — so
+    nothing may reach a live region without passing through here first."""
+    if limit <= 0:
+        return ""
+    if vlen(text) <= limit:
+        return text
+    out_chars, used, i = [], 0, 0
+    while i < len(text):
+        m = _ANSI_RE.match(text, i)
+        if m:                                  # escapes cost no columns
+            out_chars.append(m.group(0))
+            i = m.end()
+            continue
+        ch = text[i]
+        w = 0 if unicodedata.combining(ch) else (
+            2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
+        if used + w > limit - 1:
+            break
+        out_chars.append(ch)
+        used += w
+        i += 1
+    return "".join(out_chars) + (RESET if DEPTH else "") + "…"
 
 
 # ==========================================================================
@@ -152,14 +291,25 @@ SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _LOCK = threading.RLock()
 
 
+# Frida's whole layout hangs off one left margin. Every status line, rule, task
+# and card starts at the same column, so the eye has a single edge to follow
+# down a long session instead of a ragged one.
+MARGIN = "  "
+
+_LAST_BLANK = [True]
+
+
 def out(text=""):
     with _LOCK:
+        _LAST_BLANK[0] = not plain(text).strip()
         _stream().write(text + "\n")
         _stream().flush()
 
 
 def raw(text):
     with _LOCK:
+        if text and not text.endswith("\n"):
+            _LAST_BLANK[0] = False
         _stream().write(text)
         _stream().flush()
 
@@ -170,12 +320,12 @@ def data(text):
     sys.stdout.flush()
 
 
-def info(m):    out(c("teal", G.arrow + " ") + m)
-def ok(m):      out(c("lime", G.done + " ") + m)
-def warn(m):    out(c("amber", "! ") + m)
-def err(m):     out(c("red", G.fail + " ") + m)
-def dim(m):     out(c("faint", m))
-def note(m):    out(c("grey", "  " + m))
+def info(m):    out(MARGIN + c("teal", G.arrow + " ") + m)
+def ok(m):      out(MARGIN + c("lime", G.done + " ") + m)
+def warn(m):    out(MARGIN + c("amber", "! ") + m)
+def err(m):     out(MARGIN + c("red", G.fail + " ") + m)
+def dim(m):     out(MARGIN + c("faint", m))
+def note(m):    out(MARGIN + c("grey", "  " + m))
 
 
 def rule(title=""):
@@ -189,13 +339,27 @@ def rule(title=""):
     out(c("faint", G.rule * left) + c("grey", label) + c("faint", G.rule * right))
 
 
-def blank():
+def blank(collapse=True):
+    """A blank line, but never two in a row by accident.
+
+    Sections each end with their own blank and the next one opens with another,
+    which used to produce a random mix of one- and two-line gaps down the
+    screen. Collapsing them gives the page a steady rhythm — which is most of
+    what makes a dense terminal feel calm rather than cramped."""
+    if collapse and _LAST_BLANK[0]:
+        return
+    out("")
+
+
+def gap():
+    """A deliberate double gap, for the seam between major sections."""
+    out("")
     out("")
 
 
 def wrap(text, indent=0, w=None):
     """Wrap to the terminal, preserving deliberate line breaks."""
-    w = (w or width()) - indent
+    w = max(8, (w or width()) - indent)
     lines = []
     for para in (text or "").split("\n"):
         if not para.strip():
@@ -203,6 +367,25 @@ def wrap(text, indent=0, w=None):
             continue
         cur = ""
         for word in para.split():
+            # An unbreakable token — a URL, a long path — used to be emitted
+            # whole, pushing the line past the terminal and, inside a panel,
+            # straight through its own border. Split it instead.
+            while vlen(word) > w:
+                head = ""
+                for ch in word:
+                    if vlen(head + ch) > w:
+                        break
+                    head += ch
+                if not head:                 # pathological: a single wide glyph
+                    head, word = word[0], word[1:]
+                else:
+                    word = word[len(head):]
+                if cur:
+                    lines.append(cur)
+                    cur = ""
+                lines.append(head)
+            if not word:
+                continue
             if cur and vlen(cur) + 1 + vlen(word) > w:
                 lines.append(cur)
                 cur = word
@@ -290,8 +473,12 @@ class Live:
                 return
             if self.height:
                 s.write(f"\033[{self.height}A")
+            # The real terminal, not width()'s clamped layout figure: a line
+            # that wraps here costs a row the cursor arithmetic doesn't know
+            # about, and the whole board starts overwriting itself.
+            cols = shutil.get_terminal_size((80, 24)).columns
             for line in lines:
-                s.write("\033[2K" + line[:8000] + "\n")
+                s.write("\033[2K" + clip(line, cols) + "\n")
             # the previous render may have been taller
             extra = self.height - len(lines)
             for _ in range(max(0, extra)):
@@ -370,6 +557,8 @@ class TaskBoard:
         self.stage = ""
         self.stage_started = None
         self.detail = ""
+        self.preview = []
+        self.preview_label = ""
         self._live = Live()
         self._frame = 0
         self._running = False
@@ -394,6 +583,7 @@ class TaskBoard:
             if t["status"] == self.ACTIVE:
                 t["status"] = self.DONE
         self.tasks[i]["status"] = self.ACTIVE
+        self.clear_preview()          # last step's code must not bleed into this one
         self.set_stage(stage or self.tasks[i]["text"])
 
     def finish(self, which=None, note="", status=None):
@@ -424,6 +614,21 @@ class TaskBoard:
 
     def set_detail(self, detail):
         self.detail = detail
+
+    def set_preview(self, text, keep=8, label=""):
+        """The tail of what the model is writing, shown as it arrives.
+
+        This is the one piece of theatre that is also load-bearing. A spinner
+        for ninety seconds tells you nothing; watching the last few lines of
+        your tool appear tells you it understood the request, and lets you hit
+        ctrl-c at second four instead of second ninety."""
+        rows = [ln for ln in (text or "").splitlines() if ln.strip()]
+        self.preview = rows[-keep:]
+        self.preview_label = label
+
+    def clear_preview(self):
+        self.preview = []
+        self.preview_label = ""
 
     # ---- rendering ------------------------------------------------------
     def _mark(self, status):
@@ -466,6 +671,14 @@ class TaskBoard:
                 lines.append(sub)
                 if self.detail:
                     lines.append("      " + c("faint", self.detail[:width() - 8]))
+                if self.preview:
+                    room = max(24, width() - 12)
+                    rail = c("faint", G.v)
+                    if self.preview_label:
+                        lines.append("      " + rail + c("faint", " " + self.preview_label))
+                    for pl in self.preview:
+                        body = pl.rstrip().replace("\t", "    ")[:room]
+                        lines.append("      " + rail + " " + c("grey", body))
         return lines
 
     # ---- lifecycle ------------------------------------------------------
@@ -486,6 +699,7 @@ class TaskBoard:
                 t["status"] = self.DONE
         self.stage = ""
         self.detail = ""
+        self.preview = []
         self._live.stop(final=self.render())
         show_cursor()
         blank()
@@ -520,9 +734,40 @@ def say(text, who="frida"):
     """The model talking. Distinct from Frida's own chrome."""
     blank()
     out("  " + c("violet", who, bold=True))
-    for line in wrap(_light_markdown(text), indent=2).split("\n"):
-        out(line)
+    rendered = wrap(_light_markdown(text), indent=2).split("\n")
+    if motion_enabled() and sum(len(x) for x in rendered) < 400:
+        for line in rendered:
+            _type_line(line)
+    else:
+        for line in rendered:
+            out(line)
     blank()
+
+
+def _type_line(line, cps=1400):
+    """One line, arriving. Keeps existing colour codes intact by typing the
+    plain text and repainting the whole line at the end."""
+    bare = plain(line)
+    # `\r\033[2K` only clears the row the cursor is on. If the line wraps, the
+    # earlier rows survive and every frame leaves another copy behind.
+    if not bare.strip() or cells(bare) >= shutil.get_terminal_size((80, 24)).columns:
+        out(line)
+        return
+    delay = 1.0 / cps
+    step = 2
+    hide_cursor()
+    try:
+        for i in range(0, len(bare), step):
+            raw("\r\033[2K" + c("cream", bare[:i + step]))
+            time.sleep(delay * step)
+    except KeyboardInterrupt:
+        # Swallowing this per line meant say() ate one ctrl-C per line of the
+        # reply and returned as though nothing had happened.
+        set_motion(False)
+    finally:
+        show_cursor()
+        raw("\r\033[2K")
+    out(line)
 
 
 _MD_CODE = re.compile(r"`([^`]+)`")
@@ -538,6 +783,20 @@ def _light_markdown(text):
 # ==========================================================================
 # QUESTIONS  --  multiple choice, answered with a number
 # ==========================================================================
+class _Cancelled(str):
+    """Returned by ask() when the user interrupts.
+
+    It subclasses str (and equals "") so a caller that ignores it degrades to
+    "empty answer" rather than crashing — but `is ui.CANCELLED` distinguishes
+    "they pressed ctrl-C" from "they chose option 1", which callers used to be
+    unable to tell apart. /model pinned a model nobody picked; /resume loaded
+    the top session over your work."""
+    __slots__ = ()
+
+
+CANCELLED = _Cancelled()
+
+
 class Quit(Exception):
     """Raised when /quit is typed somewhere that isn't the main prompt."""
 
@@ -563,8 +822,15 @@ def _intercept(answer):
     """True if the line was a command and has been handled."""
     if not _SINK or not answer.startswith("/"):
         return False
-    if _SINK(answer) == "quit":
-        raise Quit()
+    try:
+        if _SINK(answer) == "quit":
+            raise Quit()
+    except Quit:
+        raise
+    except Exception as exc:                    # noqa: BLE001
+        # The prompt is the user's way out. A handler blowing up must not take
+        # the question down with it — report and re-ask.
+        err("that command failed: %s" % exc)
     return True
 
 
@@ -575,6 +841,7 @@ def ask(question, options, why="", allow_other=True, default=1):
     chosen label as a string — free text if the user typed their own.
     """
     opts = [{"label": o, "detail": ""} if isinstance(o, str) else o for o in options]
+    default = min(max(1, default), len(opts)) if opts else 1
     blank()
     out("  " + c("cream", question, bold=True))
     if why:
@@ -596,7 +863,7 @@ def ask(question, options, why="", allow_other=True, default=1):
             answer = input().strip()
         except (EOFError, KeyboardInterrupt):
             blank()
-            return opts[default - 1]["label"] if opts else ""
+            return CANCELLED
         if _intercept(answer):
             blank()
             out("  " + c("cream", question, bold=True))
@@ -607,7 +874,7 @@ def ask(question, options, why="", allow_other=True, default=1):
             continue
         if not answer:
             return opts[default - 1]["label"] if opts else ""
-        if answer.isdigit() and 1 <= int(answer) <= len(opts):
+        if answer.isdecimal() and 1 <= int(answer) <= len(opts):
             return opts[int(answer) - 1]["label"]
         if allow_other and answer:
             return answer
@@ -621,7 +888,10 @@ def confirm(question, default=True):
             raw(c("amber", "  " + G.arrow + " ") + question + " "
                 + c("faint", hint + " "))
             answer = input().strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
+            blank()
+            return default          # ask() returns its default at EOF too
+        except KeyboardInterrupt:
             blank()
             return False
         if _intercept(answer):
@@ -792,7 +1062,9 @@ def _gradient_rule(width=None, left="amber", right="teal"):
     w = (width or globals()["width"]()) - 2
     if w < 8:
         return ""
-    if DEPTH < 3:
+    if DEPTH < 8:
+        # DEPTH is only ever 0, 4, 8 or 24 — the old `< 3` test caught nothing
+        # but "no colour", so 16-colour terminals were sent 24-bit escapes.
         return c("faint", G.rule * w)
     a, b = _RGB[left], _RGB[right]
     parts = []
@@ -804,7 +1076,7 @@ def _gradient_rule(width=None, left="amber", right="teal"):
         r = int((a[0] + (b[0] - a[0]) * t) * fade)
         g = int((a[1] + (b[1] - a[1]) * t) * fade)
         bl = int((a[2] + (b[2] - a[2]) * t) * fade)
-        parts.append(f"\033[38;2;{r};{g};{bl}m{G.rule}")
+        parts.append(_paint(G.rule, (r, g, bl)))
     return "".join(parts) + RESET
 
 
@@ -890,3 +1162,152 @@ def next_moves(tool):
         moves.append("diff")
     moves.append("or say what to change")
     return moves
+
+
+# ==========================================================================
+# MOTION
+# ==========================================================================
+# The rule for every animation in this program: it plays on something that
+# happens rarely, or it does not play. A flourish you see once a session is
+# delight; the same flourish on every keystroke is a tax you pay all day. So
+# the wordmark shimmers at startup and a tool sweeps once when it lands, and
+# the things you do a hundred times a day stay perfectly still.
+MOTION = True
+
+
+def motion_enabled():
+    return (MOTION and is_tty() and DEPTH >= 8
+            and os.environ.get("FRIDA_PLAIN") in (None, "", "0"))
+
+
+def set_motion(on):
+    global MOTION
+    MOTION = bool(on)
+
+
+def _shade(rgb, level):
+    """`level` 0..1 — 1 is the colour, 0 is very nearly the background."""
+    r, g, b = rgb
+    level = max(0.0, min(1.0, level))
+    return (int(r * level), int(g * level), int(b * level))
+
+
+def _paint(ch, rgb):
+    if DEPTH >= 24:
+        return "\033[38;2;%d;%d;%dm%s" % (rgb[0], rgb[1], rgb[2], ch)
+    return "\033[38;5;%dm%s" % (_rgb_to_256(*rgb), ch)
+
+
+def boot(version="", subtitle="a toolsmith for the terminal"):
+    """The wordmark, with a light sweeping across it once.
+
+    Startup is the one moment in a CLI where a little theatre costs nothing:
+    you are not waiting on it, you asked for it, and you will see it once.
+    """
+    rows = [(_PAW[i], _WORDMARK[i]) for i in range(3)]
+    needed = 2 + len(rows[0][0]) + 2 + len(rows[0][1])
+    if (not UNICODE or not motion_enabled()
+            or shutil.get_terminal_size((80, 24)).columns < needed + 2):
+        # Too narrow and every row wraps, so cursor-up-3 lands mid-block and
+        # all 23 frames print below the last.
+        banner(version, subtitle)
+        return
+
+    body = _RGB["amber"]
+    accent = _RGB["cream"]
+    span = len(rows[0][0]) + 2 + len(rows[0][1])
+
+    blank()
+    for _ in rows:
+        out("")
+    hide_cursor()
+    try:
+        frames = 22
+        for fnum in range(frames + 1):
+            # the highlight travels a little past the end so it exits cleanly
+            head = -6 + (span + 12) * (fnum / frames)
+            raw("\033[%dA" % len(rows))
+            for paw, word in rows:
+                line = paw + "  " + word
+                buf = []
+                for x, ch in enumerate(line):
+                    if ch == " ":
+                        buf.append(" ")
+                        continue
+                    d = abs(x - head)
+                    if d < 3.2:
+                        mix = 1 - (d / 3.2)
+                        rgb = tuple(int(body[k] + (accent[k] - body[k]) * mix)
+                                    for k in range(3))
+                        buf.append(_paint(ch, rgb))
+                    else:
+                        # everything behind the sweep has already arrived
+                        lit = 1.0 if x < head else 0.34
+                        buf.append(_paint(ch, _shade(body, lit)))
+                raw("\033[2K  " + BOLD + "".join(buf) + RESET + "\n")
+            time.sleep(0.016)
+    finally:
+        show_cursor()
+
+    # settle into the static banner so the final frame is the real thing
+    raw("\033[%dA" % len(rows))
+    for i, (paw, word) in enumerate(rows):
+        tail = ""
+        if i == 0 and version:
+            tail = c("faint", "   v" + version)
+        if i == 2:
+            tail = c("grey", "   " + subtitle)
+        raw("\033[2K  " + c("gold" if i else "amber", paw) + "  "
+            + c("amber", word, bold=True) + tail + "\n")
+    blank()
+
+
+def sweep(text, colour="lime", passes=1):
+    """One bright pass across a finished line. Used when a tool lands."""
+    if not motion_enabled():
+        out(text)
+        return
+    base = _RGB[colour]
+    bare = plain(text)
+    hide_cursor()
+    try:
+        for _ in range(passes):
+            for fnum in range(0, len(bare) + 10, 2):
+                buf = []
+                for x, ch in enumerate(bare):
+                    d = abs(x - fnum)
+                    lit = 1.0 if d > 4 else 1.0 + (1 - d / 4) * 0.9
+                    rgb = tuple(min(255, int(v * lit)) for v in base)
+                    buf.append(_paint(ch, rgb))
+                raw("\r\033[2K" + "".join(buf) + RESET)
+                time.sleep(0.012)
+    finally:
+        raw("\r\033[2K")
+        show_cursor()
+    out(text)
+
+
+def typewriter(text, colour="cream", cps=900):
+    """Frida's prose, arriving rather than appearing.
+
+    Fast enough that reading is never delayed — the effect is that the room
+    feels alive, not that you are waiting for a machine to finish talking."""
+    if (not motion_enabled() or len(text) > 1200
+            or cells(plain(text)) >= shutil.get_terminal_size((80, 24)).columns):
+        out(c(colour, text))
+        return
+    delay = 1.0 / max(120, cps)
+    chunk = 3
+    shown = ""
+    hide_cursor()
+    try:
+        for i in range(0, len(text), chunk):
+            shown += text[i:i + chunk]
+            raw("\r\033[2K" + c(colour, shown))
+            time.sleep(delay * chunk)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        show_cursor()
+        raw("\r\033[2K")
+    out(c(colour, text))
