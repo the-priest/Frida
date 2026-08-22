@@ -25,35 +25,9 @@ import shutil
 import subprocess
 import sys
 
-from . import agent, engine, harness, ship, ui
+from . import agent, commands, engine, harness, ship, ui
 
 __version__ = engine.__version__
-
-HELP = """
-  build <what>      describe a tool and get it, tested and installed
-  run [args]        run the current tool with arguments
-  test              run it again, for real — cases, pipes, exit codes
-  review            a proper read-through: what's wrong and what to change
-  fix               feed the last failing run back and patch it
-  code              print the source to stdout
-  diff              what changed in the last round
-  deps              install what the tool imports
-  save              write a copy to ~/frida-tools
-  install           put it on your PATH as a command
-  release           assemble a GitHub-ready repo
-  freeze            build a single-file binary
-  tools             tools you've built
-  resume <id>       pick one up again
-  new               start a fresh tool
-  model             choose the model
-  key               set an API key
-  cost              tokens and spend this session
-  doctor            check this machine
-  quit              leave
-
-  anything else is an instruction: "add --json", "it crashes on empty input"
-"""
-
 
 # ==========================================================================
 # KEYS
@@ -275,165 +249,66 @@ def run_tool(f, argv):
 # REPL
 # ==========================================================================
 def repl(f):
+    """The workshop.
+
+    Two kinds of input, and the distinction is the whole point of the place:
+    commands, which do exactly one predictable thing to the tool you have, and
+    plain language, which asks Frida to change it. Everything that is a command
+    is in commands.REGISTRY, and this function does not know any of their names
+    — which is why /help can no longer advertise something that doesn't work.
+    """
+    hist = commands.install_readline()
+    commands.set_sink_for(f)
     ui.note("type an instruction, or /help")
-    while True:
-        try:
-            line = ui.prompt().strip()
-        except EOFError:
-            ui.blank()
-            return 0
-        if not line:
-            continue
-
-        if line.startswith("/"):
-            parts = line[1:].split()
-            cmd, rest = (parts[0].lower() if parts else ""), parts[1:]
-            arg = " ".join(rest)
-            if cmd in ("quit", "exit", "q"):
+    try:
+        while True:
+            try:
+                line = ui.prompt(status_arrow(f)).strip()
+            except EOFError:
+                ui.blank()
                 return 0
-            if cmd in ("help", "h", "?"):
-                ui.out(ui.c("faint", HELP))
+            except ui.Quit:
+                return 0
+            if not line:
                 continue
-            if cmd == "build":
-                if not arg:
-                    ui.err("say what to build")
-                    continue
-                f.tool = agent.Tool(f.provider)
-                f.build(arg)
-                continue
-            if cmd == "new":
-                f.tool = agent.Tool(f.provider)
-                ui.ok("fresh start")
-                continue
-            if cmd == "code":
-                if f.tool.code:
-                    ui.code(f.tool.code, title=f.tool.name + ".py")
-                else:
-                    ui.err("no tool yet")
-                continue
-            if cmd == "run":
-                run_tool(f, rest)
-                continue
-            if cmd == "test":
-                if not f.tool.code:
-                    ui.err("no tool yet")
-                    continue
-                board = ui.TaskBoard("", [agent.STEP_RUN])
-                board.show()
-                result = f.run_for_real(board)
-                board.close()
-                if result.get("blocked"):
-                    ui.warn(result["blocked"])
-                else:
-                    ui.out(result["report"])
-                continue
-            if cmd == "fix":
-                if not f.tool.last_run:
-                    ui.err("nothing to fix from — run /test first")
-                    continue
-                board = ui.TaskBoard("", [agent.STEP_FIX, agent.STEP_READ, agent.STEP_RUN])
-                board.show()
-                f.fix_loop(board, run_result=f.tool.last_run)
-                board.close()
-                continue
-            if cmd == "review":
-                if f.tool.code:
-                    f.review()
-                else:
-                    ui.err("no tool yet")
-                continue
-            if cmd == "deps":
-                deps = engine.detect_deps(f.tool.code)["pip"]
-                if not deps:
-                    ui.ok("standard library only — nothing to install")
-                    continue
-                ui.info("installing: " + ", ".join(deps))
-                res = engine.install_deps(deps)
-                (ui.ok if res.get("ok") else ui.err)(res.get("log", "")[-800:] or "done")
-                continue
-            if cmd == "save":
-                if f.tool.code:
-                    p = ship.save_copy(f.tool.code, f.tool.name)["path"]
-                    ui.file_card(p, "saved", f"python3 {p} --help")
-                continue
-            if cmd == "install":
-                if not f.tool.code:
-                    ui.err("no tool yet")
-                    continue
-                res = ship.install(f.tool.code, f.tool.name)
-                if res.get("ok"):
-                    ui.file_card(res["path"], f"{res['name']} installed",
-                                 f"{res['name']} --help")
-                    if not res["on_path"]:
-                        ui.warn("~/.local/bin isn't on your PATH:")
-                        ui.note(res["hint"])
-                else:
-                    ui.err(res.get("error", "failed"))
-                continue
-            if cmd == "release":
-                if not f.tool.code:
-                    ui.err("no tool yet")
-                    continue
-                user = arg or ui.prompt("github user ›").strip()
-                f.release(user=user)
-                continue
-            if cmd == "freeze":
-                if not f.tool.code:
-                    ui.err("no tool yet")
-                    continue
-                ui.info("building a single-file binary — this takes a minute")
-                res = ship.freeze(f.tool.code, f.tool.name)
-                if res.get("ok"):
-                    ui.file_card(res["path"], "binary built", res["path"])
-                else:
-                    ui.err((res.get("log") or "build failed")[-900:])
-                continue
-            if cmd in ("tools", "library", "ls"):
-                show_tools()
-                continue
-            if cmd == "resume":
-                record = engine.session_load(arg) if arg else None
-                if not record:
-                    sessions = engine.session_list()[:10]
-                    if not sessions:
-                        ui.note("nothing to resume")
-                        continue
-                    choice = ui.ask("resume which?",
-                                    [{"label": s.get("name") or s["id"],
-                                      "detail": f"{s.get('updated','')}  {s['id']}"}
-                                     for s in sessions], allow_other=False)
-                    record = next((engine.session_load(s["id"]) for s in sessions
-                                   if (s.get("name") or s["id"]) == choice), None)
-                if not record:
-                    ui.err("couldn't load that")
-                    continue
-                f.tool = agent.Tool.restore(record, f.provider)
-                ui.ok(f"resumed {f.tool.name} ({len(f.tool.code.splitlines())} lines)")
-                continue
-            if cmd == "model":
-                pick_model(f)
-                continue
-            if cmd == "key":
-                engine.STATE["keys"][engine.STATE["provider"]] = ""
-                ensure_key()
-                continue
-            if cmd == "cost":
-                show_cost()
-                continue
-            if cmd == "doctor":
-                doctor()
-                continue
-            if cmd == "diff":
-                ui.note("diff shows the last change once you've made one")
-                continue
-            ui.err(f"no such command: /{cmd}   (try /help)")
-            continue
-
-        # plain language
+            try:
+                if commands.dispatch(f, line) == "quit":
+                    return 0
+            except ui.Quit:
+                return 0
+            except KeyboardInterrupt:
+                ui.blank()
+                ui.warn("stopped")
+            show_hud(f)
+    finally:
+        commands.save_readline(hist)
         if f.tool.code:
-            f.iterate(line)
-        else:
-            f.build(line)
+            f.tool.save()
+
+
+def show_hud(f):
+    """Where you stand, after every action."""
+    u = engine.usage_summary()
+    cost = ""
+    if u["session"].get("calls"):
+        tilde = "" if u.get("cost_complete") else "~"
+        cost = "%s$%.4f" % (tilde, u["cost_usd"])
+    pid = engine.STATE.get("provider")
+    model = (engine.STATE.get("models") or {}).get(pid) or ""
+    if "/" in model:
+        model = model.split("/")[-1]
+    ui.hud(f.tool, model=model[:28], cost=cost,
+           session_versions=len(f.tool.history) + 1 if f.tool.code else 0)
+    moves = ui.next_moves(f.tool)
+    if moves:
+        ui.chips(*moves)
+
+
+def status_arrow(f):
+    """The prompt carries the tool's name, so you always know what you're editing."""
+    if not f.tool.code:
+        return ui.G.arrow
+    return ui.c("teal", f.tool.name) + ui.c("faint", " " + ui.G.arrow)
 
 
 # ==========================================================================
@@ -463,6 +338,10 @@ def build_parser():
     p.add_argument("--model", default=None, metavar="ID", help="pin a model for this run")
     p.add_argument("--json", action="store_true", help="machine-readable output where it applies")
     p.add_argument("--no-banner", action="store_true", help="skip the wordmark")
+    p.add_argument("--theme", default=None, metavar="NAME",
+                   help="ember, matrix, ice, synthwave, paper")
+    p.add_argument("--plain", action="store_true",
+                   help="no animation — same output, nothing moves")
     p.add_argument("--version", action="version", version="frida " + __version__)
     return p
 
@@ -470,13 +349,20 @@ def build_parser():
 # Words that look like subcommands but only exist inside the workshop. Without
 # this, `frida test` quietly builds a tool called "test" — which is exactly the
 # kind of thing that makes a CLI feel untrustworthy.
-IN_SESSION_ONLY = {"run", "test", "review", "fix", "release", "freeze", "install",
-                   "save", "deps", "diff", "new", "key", "model", "quit", "help"}
+IN_SESSION_ONLY = frozenset(
+    n for n in commands.all_names()
+    if n not in ("build", "doctor", "tools", "resume", "help"))
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    ui.set_theme(args.theme or engine.STATE.get("theme") or "ember")
+    if args.plain:
+        ui.set_motion(False)
+    if args.theme:
+        engine.STATE["theme"] = args.theme
 
     if args.provider:
         if args.provider not in engine.PROVIDERS:
@@ -520,7 +406,7 @@ def main(argv=None):
             return 1
         f.tool = agent.Tool.restore(record, f.provider)
         if not args.no_banner:
-            ui.banner(__version__)
+            ui.boot(__version__)
         ui.ok(f"resumed {f.tool.name} — {len(f.tool.code.splitlines())} lines")
         if not ensure_key():
             return 1
@@ -543,7 +429,7 @@ def main(argv=None):
 
     if request:
         if not args.no_banner:
-            ui.banner(__version__)
+            ui.boot(__version__)
         tool = f.build(request, install=not args.no_install,
                        ask=not args.yes)
         if not tool.code:
@@ -556,7 +442,7 @@ def main(argv=None):
         return 0
 
     if not args.no_banner:
-        ui.banner(__version__)
+        ui.boot(__version__)
         ui.tribute()
     return repl(f)
 

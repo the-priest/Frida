@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "1.0.1"
+__version__ = "2.1.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -217,6 +217,27 @@ def app_data_dir():
     if IS_MAC:
         return Path.home() / "Library" / "Application Support" / "Frida"
     return Path.home() / ".local" / "share" / "frida"
+
+def data_dir():
+    """Where Frida keeps things that should outlive a session (history, sessions)."""
+    return str(app_data_dir())
+
+
+_NAME_OK = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def safe_tool_name(raw, fallback="tool"):
+    """A name that is safe as a filename and legal as a shell command.
+
+    Tools get installed onto PATH, so a name is a public thing: no spaces, no
+    slashes, no leading dash (which argparse and getopt would read as a flag).
+    """
+    raw = (raw or "").strip().lower().replace(" ", "-").replace("_", "-")
+    out = "".join(ch for ch in raw if ch in _NAME_OK).strip("-")
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out[:48] or fallback
+
 
 def config_dir():
     """Per-OS config dir (small settings file)."""
@@ -485,11 +506,12 @@ STATE = {
     "keys": _initial_keys(),
     "provider": load_config().get("provider") or DEFAULT_PROVIDER,
     "models": load_config().get("models", {}),   # {provider_id: chosen_model}
+    "theme": load_config().get("theme", "ember"),
 }
 
 def persist_state():
     return save_config({"keys": STATE["keys"], "provider": STATE["provider"],
-                        "models": STATE["models"]})
+                        "models": STATE["models"], "theme": STATE.get("theme", "ember")})
 
 # --------------------------------------------------------------------------
 # LIVE MODEL CATALOG  -- ask each provider what YOUR key can actually call
@@ -762,7 +784,7 @@ def _new_session_id():
     return time.strftime("s%Y%m%d-%H%M%S") + f"-{seq:03d}"
 
 def session_save(sid, name, code, messages, version="testing", args="",
-                 ver="1.0.0", named=False, title=""):
+                 ver="1.0.0", named=False, title="", history=None):
     """Auto-save the live conversation+code for a tool in progress (its full state)."""
     os.makedirs(SESSION_DIR, exist_ok=True)
     # A second-resolution id meant two tools started inside the same second got the
@@ -771,6 +793,7 @@ def session_save(sid, name, code, messages, version="testing", args="",
     rec = {"id": sid, "name": name or "untitled", "code": code or "",
            "messages": messages or [], "version": version or "testing", "args": args or "",
            "deps": detect_deps(code or "")["pip"],
+           "history": history or [], "lines": len((code or "").splitlines()),
            "ver": ver or "1.0.0", "named": bool(named), "title": title or (name or "untitled"),
            "updated": time.strftime("%Y-%m-%d %H:%M")}
     if not write_json_atomic(os.path.join(SESSION_DIR, _safe_id(sid) + ".json"), rec):
@@ -782,6 +805,8 @@ def session_list():
         msgs = r.get("messages", [])
         return {"id": r.get("id"), "name": r.get("name"),
                 "updated": r.get("updated"), "deps": r.get("deps") or [],
+                "lines": r.get("lines") or len((r.get("code") or "").splitlines()),
+                "ver": r.get("ver") or "1.0.0",
                 "turns": sum(1 for m in msgs if m.get("role") == "user"),
                 "hasCode": bool(r.get("code"))}
     out = _summarise_dir(SESSION_DIR, _build)
@@ -1156,12 +1181,15 @@ def _http_post_stream(url, headers, body, idle_timeout=None, total_timeout=None,
                     finish = ch["finish_reason"]
             if on_progress:
                 now = time.time()
-                if now - last_tick >= 1.0:     # at most one activity event a second
+                # Four ticks a second when something is actually drawing the text
+                # (the live code preview), one a second when it's only a counter.
+                every = 0.25 if GEN_WATCHER[0] else 1.0
+                if now - last_tick >= every:
                     last_tick = now
                     try:
                         on_progress(sum(len(x) for x in content),
                                     sum(len(x) for x in reasoning),
-                                    now - started)
+                                    now - started, "".join(content))
                     except Exception:
                         pass
 
@@ -1609,12 +1637,18 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
     total_timeout = MODEL_TIMEOUT.get(tier, MODEL_TIMEOUT["cheap"])
     model = None                     # bound by the loop; referenced by _post below
 
-    def _progress(nchars, nreason, elapsed):
+    def _progress(nchars, nreason, elapsed, text=""):
         # Live feedback while the model writes. This is what turns "the spinner
         # has been going for two minutes, is it dead?" into a visible word count,
         # and it keeps the SSE relay's idle watchdog fed for the whole generation.
         _emit("gen", chars=nchars, reasoning=nreason,
               secs=int(elapsed), model=model)
+        watcher = GEN_WATCHER[0]
+        if watcher:
+            try:
+                watcher(text, nchars, elapsed)
+            except Exception:
+                pass
 
     provider_degraded = [False]     # set once a 5xx exhausts a model's retry budget
 
@@ -3118,6 +3152,28 @@ def _wants_fresh_build(text):
 # narrating itself, not a decorative animation.
 # ==========================================================================
 _ACTIVITY = threading.local()
+
+# Set while something is drawing the model's output as it streams in. A single
+# slot rather than a list: there is one terminal, and exactly one thing may own
+# the live region at a time.
+GEN_WATCHER = [None]
+
+
+class watching_generation:
+    """`with engine.watching_generation(fn):` — fn(text, chars, secs) as it streams."""
+
+    def __init__(self, fn):
+        self.fn = fn
+        self.prev = None
+
+    def __enter__(self):
+        self.prev = GEN_WATCHER[0]
+        GEN_WATCHER[0] = self.fn
+        return self
+
+    def __exit__(self, *exc):
+        GEN_WATCHER[0] = self.prev
+        return False
 
 def _emit(kind, **data):
     """Push one activity event to the channel bound to THIS build thread, if any.

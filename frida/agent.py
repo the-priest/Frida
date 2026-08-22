@@ -50,6 +50,29 @@ STEP_SHIP = "Hand it over"
 # ==========================================================================
 # THE TOOL UNDER CONSTRUCTION
 # ==========================================================================
+def _previewer(board):
+    """Feed the board the tail of the code as the model writes it.
+
+    The model answers in markdown, so during a build the interesting part is
+    inside a fence and the prose around it is not. Showing the fence markers
+    and the chatter would make this noise; showing the code makes it a window.
+    """
+    def show(text, chars, secs):
+        body = text
+        fence = text.find("```")
+        if fence != -1:
+            body = text[text.find("\n", fence) + 1:] if "\n" in text[fence:] else ""
+            close = body.find("```")
+            if close != -1:
+                body = body[:close]
+        elif len(text) < 40:
+            return                       # nothing worth showing yet
+        rate = int(chars / max(0.5, secs))
+        board.set_detail("%s chars  ·  %s/s" % (f"{chars:,}", f"{rate:,}"))
+        board.set_preview(body, keep=8)
+    return show
+
+
 class Tool:
     """Everything Frida knows about the tool it is currently building."""
 
@@ -67,6 +90,57 @@ class Tool:
         self.last_run = None
         self.provider = provider
         self.summary = ""
+        # Every accepted version of the code, oldest first, each with the note
+        # that produced the NEXT one. You cannot spend a week perfecting a tool
+        # if a bad patch is unrecoverable, so nothing here is ever overwritten
+        # in place — changes push, /undo pops, /revert jumps.
+        self.history = []
+        self.future = []
+        # Bumping the version before the write meant the snapshot banked the NEW
+        # number against the OLD code, so /versions showed two v1.0.0 entries and
+        # told you nothing. The bump is now applied after the snapshot, by write().
+        self.pending_bump = None
+
+    # ---- history --------------------------------------------------------
+    def snapshot(self, note=""):
+        """Bank the current code before replacing it."""
+        if not self.code:
+            return
+        self.history.append({"ver": self.ver, "code": self.code,
+                             "note": (note or "").strip()[:400]})
+        del self.history[:-60]      # keep the last 60; a tool is not a git repo
+        self.future.clear()
+
+    def previous_code(self):
+        return self.history[-1]["code"] if self.history else None
+
+    def undo(self):
+        if not self.history:
+            return None
+        self.future.append({"ver": self.ver, "code": self.code, "note": "undone"})
+        snap = self.history.pop()
+        self.code, self.ver = snap["code"], snap["ver"]
+        self.last_run = None
+        return snap
+
+    def redo(self):
+        if not self.future:
+            return None
+        self.history.append({"ver": self.ver, "code": self.code, "note": "redone"})
+        snap = self.future.pop()
+        self.code, self.ver = snap["code"], snap["ver"]
+        self.last_run = None
+        return snap
+
+    def revert(self, n):
+        """Jump to version n as /versions numbers them (1-based, oldest first)."""
+        if not (1 <= n <= len(self.history)):
+            return None
+        target = self.history[n - 1]
+        self.snapshot("reverted to v" + target["ver"])
+        self.code, self.ver = target["code"], target["ver"]
+        self.last_run = None
+        return target
 
     # ---- versioning -----------------------------------------------------
     def bump(self, kind="patch"):
@@ -86,7 +160,7 @@ class Tool:
     def save(self):
         self.sid = engine.session_save(self.sid, self.name, self.code, self.messages,
                                        self.version, self.args, self.ver, self.named,
-                                       self.title).get("id", self.sid)
+                                       self.title, self.history).get("id", self.sid)
         return self.sid
 
     @classmethod
@@ -101,6 +175,7 @@ class Tool:
         t.version = record.get("version") or "testing"
         t.ver = record.get("ver") or "1.0.0"
         t.args = record.get("args") or ""
+        t.history = record.get("history") or []
         return t
 
 
@@ -231,7 +306,8 @@ class Frida:
         if self.auto:
             board.show()
             return True
-        answer = ui.prompt(ui.G.arrow, "enter to build it · or say what to change")
+        answer = ui.prompt(ui.G.arrow, "enter to build it · or say what to change",
+                           commands=True)
         if answer.strip():
             board.show()
             return answer.strip()
@@ -246,7 +322,10 @@ class Frida:
         board.start(step_label, "thinking")
         t0 = time.time()
         prior = _last_user(self.tool.messages)
+        with engine.watching_generation(_previewer(board)):
+            return self._write_inner(instruction, board, step_label, t0, prior)
 
+    def _write_inner(self, instruction, board, step_label, t0, prior):
         if self.tool.code and not engine._wants_fresh_build(instruction):
             res = self._call_edit(instruction, prior, board)
             if res is None:
@@ -272,7 +351,12 @@ class Frida:
 
         self.tool.messages.append({"role": "user", "content": instruction})
         self.tool.messages.append({"role": "assistant", "content": reply})
+        had_code = bool(self.tool.code)
+        self.tool.snapshot(instruction)
         self.tool.code = code
+        if had_code:
+            self.tool.bump(self.tool.pending_bump or "patch")
+        self.tool.pending_bump = None
         secs = time.time() - t0
         board.finish(step_label, f"{len(code.splitlines())} lines  ·  {secs:.0f}s"
                      + ("  ·  patched" if res.get("edit_mode") else ""))
@@ -395,7 +479,9 @@ class Frida:
             if not code:
                 board.fail(STEP_FIX, "the model returned no code")
                 return False
+            self.tool.snapshot("fix round %d" % rounds)
             self.tool.code = code
+            self.tool.bump("patch")
             self.tool.messages.append({"role": "user", "content": instruction})
             self.tool.messages.append({"role": "assistant", "content": res["reply"]})
             board.finish(STEP_FIX, f"round {rounds} applied")
@@ -521,6 +607,8 @@ class Frida:
             ui.say(reply)
         if delivered and delivered.get("installed"):
             inst = delivered["installed"]
+            ui.sweep("  " + ui.c("lime", ui.G.done + " " + self.tool.name
+                                 + " is ready"), colour="lime")
             ui.file_card(inst["path"], f"{self.tool.name} is installed",
                          run_hint=f"{self.tool.name} --help")
             if not inst.get("on_path"):
@@ -553,7 +641,7 @@ class Frida:
         board = ui.TaskBoard("", [step, STEP_READ, STEP_RUN, STEP_FIX, STEP_SHIP])
         board.show()
         try:
-            self.tool.bump("patch")
+            self.tool.pending_bump = "patch"
             built, error = self.write(instruction, board, step)
             if error or not built:
                 board.close()
@@ -620,7 +708,7 @@ class Frida:
         board.show()
         try:
             self.tool.version = "release"
-            self.tool.bump("minor")
+            self.tool.pending_bump = "minor"
             built, error = self.write(
                 "Produce the RELEASE version of this tool: a proper module docstring, clean "
                 "structure, comments where the code isn't obvious, no dead code, no debug "

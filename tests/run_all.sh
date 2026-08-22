@@ -12,6 +12,10 @@ echo "== end to end =="
 python3 tests/test_end_to_end.py || fail=1
 
 echo
+echo "== commands =="
+python3 tests/test_commands.py 2>/dev/null || fail=1
+
+echo
 echo "== interactive =="
 python3 tests/test_interactive.py 2>/dev/null || fail=1
 

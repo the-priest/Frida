@@ -120,9 +120,11 @@ frida code | wc -l                 # the source, on stdout, pipeable
 frida doctor --json                # for scripts
 ```
 
-Inside the workshop, plain language is an instruction — *"add `--json`"*, *"it
-crashes on an empty file"*, *"make the output a table"* — and slash commands do
-the rest:
+### Two kinds of input
+
+Anything that isn't a command is an instruction for Frida — *"add `--json`"*,
+*"it crashes on an empty file"*, *"make the output a table"*. Everything else
+is a command, and commands do exactly one predictable thing:
 
 | | |
 |---|---|
@@ -130,12 +132,83 @@ the rest:
 | `/test` | run it for real again — cases, pipes, exit codes |
 | `/fix` | feed the last failing run back and patch it |
 | `/review` | a proper read-through: severity, line, and the change to make |
-| `/code` `/diff` `/deps` | look at it, compare it, install what it imports |
-| `/install` `/save` | on your PATH, or a copy in `~/frida-tools` |
+| `/undo` `/redo` `/versions` `/revert <n>` | every version is kept; nothing is lost |
+| `/code` `/diff` `/status` | look at it, compare it, see where it stands |
+| `/deps` `/install` `/save` | dependencies, PATH, or a copy in `~/frida-tools` |
 | `/release` | a GitHub-ready repo — README, install.sh, LICENSE, push commands |
 | `/freeze` | a single-file binary via PyInstaller |
-| `/resume` `/new` `/tools` | sessions and history |
-| `/model` `/key` `/cost` | provider settings and what you've spent |
+| `/resume` `/new` `/tools` `/rename` | sessions and history |
+| `/model` `/key` `/cost` `/doctor` | settings, spend, and this machine |
+
+The slash is optional at the main prompt: a bare word that names a command
+**is** that command, so `test` runs the tests. A sentence that merely starts
+with one is still a sentence, so `test it with an empty file` goes to Frida.
+When you want the word taken literally, lead with `>`:
+
+```
+test                          → runs the tests
+test it with an empty file    → an instruction
+> test                        → the word "test", sent to Frida
+```
+
+Commands work **everywhere** — at a question, at the plan, mid-flow. A question
+is a pause, not a cage: you can `/code` to look at what you have, `/save` it,
+and come back to the same question. Tab completes, `↑` recalls across sessions,
+`ctrl-c` stops the current step without killing the session.
+
+### It should look like something
+
+Five themes. `/theme` on its own shows them all, swatched, and it sticks
+between sessions.
+
+```
+── themes ──────────────────────────────────────────
+  ✔  ember       warm amber · the default       text ✔ ✗ tool
+     matrix      green phosphor                 text ✔ ✗ tool
+     ice         cold blues · easiest at 3am    text ✔ ✗ tool
+     synthwave   loud. gloriously loud          text ✔ ✗ tool
+     paper       for light terminals            text ✔ ✗ tool
+```
+
+There is animation, and there is a rule about it: **it plays on something that
+happens rarely, or it does not play.** The wordmark sweeps in once at startup.
+A finished tool gets one pass of light when it lands. The things you do a
+hundred times a day stay perfectly still, because a flourish you see once a
+session is delight and the same flourish on every keystroke is a tax.
+
+The one piece of theatre that is also load-bearing is the live code view. While
+the model writes, the last few lines of your tool appear under the checklist as
+they arrive:
+
+```
+  ⠦ Write jointcalc
+    › thinking  4s
+      1,840 chars  ·  575/s
+      │ def split(total, ratio):
+      │     weed = total * ratio
+      │     return weed, total - weed
+```
+
+A spinner for ninety seconds tells you nothing. This tells you it understood
+the request, and lets you hit `ctrl-c` at second four instead of second ninety.
+
+`--plain` (or `FRIDA_PLAIN=1`) turns all motion off and changes nothing else.
+Motion is off automatically whenever output isn't a terminal, so piping and CI
+logs stay clean. `FORCE_COLOR=1` keeps the colours when you *do* want to pipe
+somewhere that understands them — `frida code | less -R`.
+
+### Nothing you build is lost
+
+Every accepted change is a version. `/versions` lists them, `/undo` steps back,
+`/revert 3` jumps. A bad patch at midnight costs you one keystroke, which is
+the only reason it is safe to keep going at midnight.
+
+```
+── versions ──────────────────────────────────────────────
+   1  v1.0.0     27 ln  first build
+   2  v1.0.1     51 ln  add --json
+  ✔  v1.0.2     58 ln  current
+```
 
 ---
 
