@@ -430,6 +430,141 @@ for env, expect in [({"KITTY_WINDOW_ID": "1"}, "kitty"),
     check(f"{expect} is recognised", name == expect and bool(keys), name)
 
 print()
+print("== secrets must not leak ==")
+
+# Frida runs code a model wrote thirty seconds ago, and it used to hand that
+# code the whole environment: the user's provider keys, GITHUB_TOKEN, cloud
+# credentials — with working network access.
+from frida import harness                                # noqa: E402
+
+saved_env = dict(os.environ)
+os.environ.update({"SILICONFLOW_API_KEY": "sk-REAL-KEY-DO-NOT-LEAK",
+                   "ZAI_API_KEY": "zai-REAL", "GITHUB_TOKEN": "ghp_real",
+                   "AWS_SECRET_ACCESS_KEY": "aws-real", "MY_PASSWORD": "hunter2"})
+box = harness.Sandbox("print(1)", "probe")
+visible = set(box.env)
+for name in ("SILICONFLOW_API_KEY", "ZAI_API_KEY", "GITHUB_TOKEN",
+             "AWS_SECRET_ACCESS_KEY", "MY_PASSWORD"):
+    check(f"{name} is hidden from generated code", name not in visible)
+check("the tool still gets a PATH", bool(box.env.get("PATH")))
+check("the tool still gets a HOME", bool(box.env.get("HOME")))
+check("the tool's HOME is the sandbox, not the user's",
+      box.env["HOME"] != saved_env.get("HOME"))
+
+# ...and prove it at runtime, not just in the dict.
+thief = harness.Sandbox(
+    'import os; print("SAW:", os.environ.get("SILICONFLOW_API_KEY"))', "thief")
+got = harness._invoke(thief, [], timeout=15)["stdout"]
+check("a tool that reads the key at runtime gets nothing",
+      "SAW: None" in got, got.strip()[:80])
+os.environ.clear()
+os.environ.update(saved_env)
+
+# A key pasted at the prompt used to be written to the history file in plain
+# text, because readline records what input() reads.
+check("an API key is recognised as a secret",
+      ui.looks_secret("sk-abcd1234efgh5678ijkl"))
+check("an ordinary instruction is not", not ui.looks_secret("add a --json flag"))
+
+import readline as _rl                                   # noqa: E402
+try:
+    _rl.clear_history()
+except Exception:
+    pass
+_rl.add_history("build a csv tool")
+_rl.add_history("sk-abcd1234efgh5678ijklmnop")
+_rl.add_history("add a --json flag")
+hist_path = os.path.join(_SANDBOX, "history")
+commands.save_readline(hist_path)
+body = open(hist_path).read()
+check("the history file drops anything key-shaped", "sk-abcd" not in body, body)
+check("...but keeps ordinary lines", "build a csv tool" in body)
+check("the history file is owner-only",
+      (os.stat(hist_path).st_mode & 0o077) == 0, oct(os.stat(hist_path).st_mode))
+
+# Provider error bodies are shown to the user and fed back to the model.
+engine.STATE["keys"]["siliconflow"] = "sk-SECRETKEY123456789"
+red = engine.redact("401: key sk-SECRETKEY123456789 is invalid")
+check("a key echoed in an error is redacted", "SECRETKEY123456789" not in red, red)
+check("...and the message is still readable", "401" in red and "invalid" in red)
+
+print()
+print("== models ==")
+
+check("z.ai is a provider", "zai" in engine.PROVIDERS)
+check("z.ai has an env var name", engine.PROVIDERS["zai"]["env"] == "ZAI_API_KEY")
+check("glm-5.3 is z.ai's first choice",
+      engine.preferred_model("zai", ["glm-4.6", "glm-5.3", "glm-4.5-air"]) == "glm-5.3")
+check("z.ai has no models endpoint, so the built-in list is used",
+      engine.PROVIDERS["zai"]["models_url"] == ""
+      and "glm-5.3" in engine.PROVIDERS["zai"]["models"])
+
+live = ["Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V4-Pro",
+        "deepseek-ai/DeepSeek-V4-Flash-0731"]
+check("the 0731 Flash wins when offered",
+      engine.preferred_model("siliconflow", live)
+      == "deepseek-ai/DeepSeek-V4-Flash-0731")
+check("plain Flash is the fallback",
+      engine.preferred_model("siliconflow", ["deepseek-ai/DeepSeek-V4-Flash"])
+      == "deepseek-ai/DeepSeek-V4-Flash")
+check("a different namespace still matches",
+      engine.preferred_model("siliconflow", ["deepseek/DeepSeek-V4-Flash-0731"])
+      == "deepseek/DeepSeek-V4-Flash-0731")
+check("nothing known means no forced pick",
+      engine.preferred_model("siliconflow", ["some/unknown-model"]) is None)
+
+engine._MODEL_CACHE["siliconflow"] = live
+check("the preferred model leads the chain",
+      engine.provider_model_chain("siliconflow")[0]
+      == "deepseek-ai/DeepSeek-V4-Flash-0731")
+check("...and every other model is still in it",
+      len(engine.provider_model_chain("siliconflow")) == len(live))
+engine._MODEL_CACHE.pop("siliconflow", None)
+
+# /model read fetch_models()'s dict as a list and sliced it.
+import builtins                                          # noqa: E402
+feed = iter(["1"])
+builtins.input = lambda *a: next(feed)
+crashed = ""
+try:
+    main.pick_model()
+except Exception as exc:                                 # noqa: BLE001
+    crashed = "%s: %s" % (type(exc).__name__, exc)
+check("/model does not crash", not crashed, crashed)
+
+print()
+print("== the prompt does not carry ten copies of the file ==")
+
+# Every assistant turn holds the whole file, and all of them were sent.
+big_tool = "\n".join("line %d" % i for i in range(300))
+conv = agent.Tool()
+for n in range(10):
+    conv.messages.append({"role": "user", "content": "change %d" % n})
+    conv.messages.append({"role": "assistant",
+                          "content": "```python\n" + big_tool + "\n```"})
+raw_size = sum(len(m["content"]) for m in conv.messages)
+view = conv.prompt_view()
+view_size = sum(len(m["content"]) for m in view)
+
+check("the sent conversation is far smaller than the stored one",
+      view_size < raw_size / 4, "%d vs %d" % (view_size, raw_size))
+check("the newest version of the file is still sent in full",
+      big_tool in view[-1]["content"])
+check("every user turn survives",
+      [m["content"] for m in view if m["role"] == "user"]
+      == ["change %d" % n for n in range(10)])
+check("the stored conversation is untouched",
+      sum(len(m["content"]) for m in conv.messages) == raw_size)
+
+# Collapsing must not break prefix caching: earlier entries must be stable.
+prefix_before = [m["content"] for m in conv.prompt_view()][:18]
+conv.messages.append({"role": "user", "content": "one more"})
+conv.messages.append({"role": "assistant", "content": "```python\nnew\n```"})
+prefix_after = [m["content"] for m in conv.prompt_view()][:18]
+check("adding a turn does not rewrite the earlier prompt (cache stays warm)",
+      prefix_before[:-1] == prefix_after[:-1])
+
+print()
 if FAILURES:
     print(f"something failed: {len(FAILURES)}")
     for f_ in FAILURES:

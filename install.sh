@@ -94,12 +94,21 @@ mkdir -p "$SHARE/frida" "$BIN"
 # mention it, and every upgraded install died on `ImportError: cannot import
 # name 'commands'`. A local install now takes whatever is actually in the
 # package directory, so it cannot drift again.
-# MODULES: __init__.py agent.py commands.py engine.py harness.py main.py prompts.py ship.py ui.py
+# The modules to fetch when installing over the network, where globbing is not
+# possible. tests/test_install.sh fails if this drifts from frida/*.py.
+# This must stay a plain shell variable: `curl … | bash` gives $0 as "bash",
+# so anything that reads the script's own file does not exist to be read.
+MODULES="__init__.py agent.py commands.py engine.py harness.py main.py prompts.py ship.py ui.py"
 EXTRAS="bin/frida LICENSE README.md"
 
-if [ -f "$(dirname "$0")/frida/engine.py" ]; then
+# $0 is "bash" when piped from curl, so guard the local-clone detection on a
+# path that actually exists rather than on dirname of a non-file.
+SELF_DIR=""
+if [ -f "$0" ]; then SELF_DIR="$(cd "$(dirname "$0")" && pwd)"; fi
+
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/frida/engine.py" ]; then
   # running from a clone
-  SRC="$(cd "$(dirname "$0")" && pwd)"
+  SRC="$SELF_DIR"
   say "${DIM}  installing from $SRC${OFF}"
   # Clear out any modules from a previous version that no longer exist, so a
   # deleted file can't linger and shadow something.
@@ -115,7 +124,9 @@ if [ -f "$(dirname "$0")/frida/engine.py" ]; then
 else
   # Fetching over the network can't glob, so this list is checked by the test
   # suite against the real package directory.
-  FILES="$(sed -n 's/^# MODULES: //p' "$0" | tr ' ' '\n' | sed 's|^|frida/|') $EXTRAS"
+  FILES=""
+  for m in $MODULES; do FILES="$FILES frida/$m"; done
+  FILES="$FILES $EXTRAS"
   say "${DIM}  fetching from github.com/${REPO_USER}/${REPO_NAME}${OFF}"
   for f in $FILES; do
     mkdir -p "$SHARE/$(dirname "$f")"

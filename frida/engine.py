@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -353,6 +353,7 @@ PROVIDERS = {
         # strongest coding model on this provider (93.5% LiveCodeBench). Flash sits
         # right behind it and does all the cheap auxiliary work: see MODEL_TIERS.
         "models": [
+            "deepseek-ai/DeepSeek-V4-Flash-0731",
             "deepseek-ai/DeepSeek-V4-Flash",
             "deepseek-ai/DeepSeek-V4-Pro",
             "deepseek-ai/DeepSeek-V3",
@@ -373,6 +374,22 @@ PROVIDERS = {
             "gemini-2.0-flash",
             "gemini-1.5-pro",
             "gemini-1.5-flash",
+        ],
+    },
+    "zai": {
+        "label": "Z.ai",
+        # Z.ai's OpenAI-compatible surface. There is no documented /models
+        # listing endpoint, so the list below is the source of truth rather
+        # than a fallback — fetch_models degrades to it cleanly.
+        "url": "https://api.z.ai/api/paas/v4/chat/completions",
+        "models_url": "",
+        "env": "ZAI_API_KEY",
+        "kind": "openai",
+        "models": [
+            "glm-5.3",
+            "glm-5",
+            "glm-4.6",
+            "glm-4.5-air",
         ],
     },
     "novita": {
@@ -415,13 +432,60 @@ DEFAULT_MODEL_BY_PROVIDER = {
 # harder build work just picks it there and, as of this version, that choice
 # actually sticks. (Google/Groq unchanged — different model families.)
 MODEL_TIERS = {
-    "siliconflow": {"build": "deepseek-ai/DeepSeek-V4-Flash",
-                    "cheap": "deepseek-ai/DeepSeek-V4-Flash"},
+    "siliconflow": {"build": "deepseek-ai/DeepSeek-V4-Flash-0731",
+                    "cheap": "deepseek-ai/DeepSeek-V4-Flash-0731"},
     "novita":      {"build": "deepseek/deepseek-v4-flash",
                     "cheap": "deepseek/deepseek-v4-flash"},
     "google":      {"build": "gemini-2.5-pro", "cheap": "gemini-2.5-flash"},
+    "zai":         {"build": "glm-5.3", "cheap": "glm-4.5-air"},
     "groq":        {"build": None, "cheap": None},     # use whatever the chain gives
 }
+
+# What Frida wants, in order, when nothing is pinned. Matched against the models
+# the provider actually lists, so a renamed or retired id degrades to the next
+# choice instead of 404-ing every call.
+#
+# On SiliconFlow the 0731 Flash is the one to want: same architecture as the
+# original V4 Flash, re-post-trained for agentic work, which is exactly what
+# this program does all day — read a file, patch it, read the failure, patch
+# again. Pro is stronger in the abstract and roughly 5x the price; Flash 0731
+# beats it on the tight edit loop that dominates Frida's token spend.
+PREFERRED = {
+    "siliconflow": [
+        "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "deepseek-ai/DeepSeek-V4-Pro",
+        "deepseek-ai/DeepSeek-V3",
+    ],
+    "zai": ["glm-5.3", "glm-5", "glm-4.6"],
+    "novita": ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v3"],
+    "google": ["gemini-2.5-pro", "gemini-2.5-flash"],
+    "groq": ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
+}
+
+
+def preferred_model(provider_id, available=None):
+    """The best model Frida knows of that this provider actually offers.
+
+    `available` is the live list when we have one. Matching is exact first, then
+    case-insensitive, then by suffix — providers disagree about namespacing the
+    same model ("deepseek-ai/X" vs "deepseek/X" vs "X").
+    """
+    wants = PREFERRED.get(provider_id) or []
+    have = list(available or [])
+    if not have:
+        return wants[0] if wants else None
+    lower = {m.lower(): m for m in have}
+    tails = {}
+    for m in have:
+        tails.setdefault(m.rsplit("/", 1)[-1].lower(), m)
+    for want in wants:
+        if want in have:
+            return want
+        hit = lower.get(want.lower()) or tails.get(want.rsplit("/", 1)[-1].lower())
+        if hit:
+            return hit
+    return None
 
 # Ceilings on the reply. Without one, a model that starts rambling bills you for
 # every token of it. A 2000-line tool is about 25k tokens, so 32k is generous.
@@ -726,8 +790,18 @@ def fetch_models(provider_id, force=False):
             "error": (last_err or "could not reach provider") + hint}
 
 def provider_model_chain(provider_id):
-    """The model order to try: live catalog if we have it, else the static fallback."""
-    return _MODEL_CACHE.get(provider_id) or list(PROVIDERS[provider_id]["models"])
+    """The model order to try: live catalog if we have it, else the static fallback.
+
+    Whatever the order, the model Frida actually wants goes first when the
+    provider offers it. A live /models listing comes back in the provider's own
+    order — often alphabetical, or newest-API-first — so without this the first
+    call of every session went to whatever happened to be at the top.
+    """
+    chain = _MODEL_CACHE.get(provider_id) or list(PROVIDERS[provider_id]["models"])
+    want = preferred_model(provider_id, chain)
+    if want and want in chain:
+        chain = [want] + [m for m in chain if m != want]
+    return chain
 
 # --------------------------------------------------------------------------
 # TOOL LIBRARY  -- persistent, reloadable tools (code + conversation)
@@ -1580,6 +1654,22 @@ def _looks_like_refusal(reply):
     head = text[:240]
     return bool(_REFUSAL_RE.search(head))
 
+def redact(text):
+    """Blank out anything that looks like one of our own keys.
+
+    Provider error bodies are echoed to the user and into the model's next
+    prompt. Most gateways don't repeat your key back at you — but "most" is not
+    a property worth relying on when the cost of being wrong is a live
+    credential in a screenshot or a log.
+    """
+    out = str(text or "")
+    for key in (STATE.get("keys") or {}).values():
+        key = (key or "").strip()
+        if len(key) >= 8 and key in out:
+            out = out.replace(key, key[:4] + "…" + key[-2:] + " [redacted]")
+    return out
+
+
 def _err_detail(exc):
     """Read an HTTPError's body at most once and cache it on the exception.
 
@@ -1597,6 +1687,7 @@ def _err_detail(exc):
         detail = exc.read().decode(errors="replace")[:400]
     except Exception:
         detail = ""
+    detail = redact(detail)
     try:
         exc._frida_detail = detail
     except Exception:
@@ -1668,8 +1759,14 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
     #   3. neither → the provider default.
     user_pick = STATE.get("models", {}).get(pid)
     pinned = None                     # the model the user chose, if they chose one
-    chosen = user_pick or (MODEL_TIERS.get(pid) or {}).get(tier) or DEFAULT_MODEL_BY_PROVIDER.get(pid)
     chain = provider_model_chain(pid)
+    # The tier's model is a NAME, and the provider may not offer that exact name
+    # (0731 not rolled out yet, a different namespace, a retired id). Resolve it
+    # against what is really on offer instead of sending an id that 404s.
+    tier_pick = (MODEL_TIERS.get(pid) or {}).get(tier)
+    if tier_pick and chain and tier_pick not in chain:
+        tier_pick = preferred_model(pid, chain) or None
+    chosen = user_pick or tier_pick or DEFAULT_MODEL_BY_PROVIDER.get(pid)
     if user_pick:
         # The user named a model. Don't second-guess it by queueing a pile of
         # other models behind it: try that model (repeated briefly to ride out a

@@ -901,6 +901,55 @@ def confirm(question, default=True):
         return answer.lower().startswith("y")
 
 
+_SECRETISH = re.compile(
+    r"(sk-[A-Za-z0-9_\-]{12,}|gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_\-]{30,}"
+    r"|[A-Za-z0-9]{8,}\.[A-Za-z0-9]{16,}|\b[A-Fa-f0-9]{32,}\b)")
+
+
+def looks_secret(text):
+    """Does this line contain something shaped like an API key?"""
+    return bool(_SECRETISH.search(text or ""))
+
+
+def secret_prompt(label):
+    """Read a secret without echoing it and without recording it.
+
+    input() echoes, and — because the REPL installs readline — it also appends
+    to the history buffer, which Frida then writes to a file on disk. Pasting a
+    key left it in plain text in ~/.local/share/frida/history. getpass reads
+    from the tty directly: no echo, and readline never sees it.
+    """
+    import getpass
+    raw(label)
+    try:
+        value = getpass.getpass("")
+    except (EOFError, KeyboardInterrupt):
+        blank()
+        return ""
+    except Exception:
+        # No tty (piped input, some IDE terminals). Fall back to a visible read
+        # rather than failing, but say so first.
+        warn("this terminal won't hide typing — the key will be visible")
+        try:
+            value = input()
+        except (EOFError, KeyboardInterrupt):
+            blank()
+            return ""
+    forget_last_history_line()
+    return (value or "").strip()
+
+
+def forget_last_history_line():
+    """Drop the most recent readline entry, if readline is loaded."""
+    try:
+        import readline
+        n = readline.get_current_history_length()
+        if n > 0:
+            readline.remove_history_item(n - 1)
+    except Exception:
+        pass
+
+
 def prompt(label=G.arrow, hint="", commands=False):
     """An input line. With commands=True, /commands are handled here and the
     caller is only ever handed something that is genuinely an answer."""

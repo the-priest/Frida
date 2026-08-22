@@ -879,11 +879,28 @@ def install_readline():
 
 
 def save_readline(path):
+    """Write the history file, minus anything that looks like a credential.
+
+    /key no longer goes through readline at all, but a key can still reach the
+    history the ordinary way — pasted at the main prompt by mistake, or typed
+    into an instruction. A shell-history file full of live API keys is a
+    well-known way to leak one, and this file is ours to keep clean.
+    """
     if not path:
         return
     try:
         import readline
+    except ImportError:
+        return
+    try:
+        for i in range(readline.get_current_history_length(), 0, -1):
+            if ui.looks_secret(readline.get_history_item(i) or ""):
+                readline.remove_history_item(i - 1)
+    except Exception:
+        pass
+    try:
         readline.write_history_file(path)
+        os.chmod(path, 0o600)
     except Exception:
         pass
 

@@ -102,11 +102,9 @@ def ensure_key(interactive=True, force_prompt=False):
                     if engine.DEFAULT_PROVIDER in ids else 1)
     pid = next((i for i, p in engine.PROVIDERS.items() if p["label"] == choice), ids[0])
     ui.blank()
-    ui.raw(ui.c("amber", "  " + ui.G.arrow + " ") + f"paste your {engine.PROVIDERS[pid]['label']} key: ")
-    try:
-        key = input().strip()
-    except (EOFError, KeyboardInterrupt):
-        return False
+    key = ui.secret_prompt(
+        ui.c("amber", "  " + ui.G.arrow + " ")
+        + f"paste your {engine.PROVIDERS[pid]['label']} key (not shown): ")
     if not key:
         return False
     engine.STATE["keys"][pid] = key
@@ -213,21 +211,54 @@ def show_tools(as_json=False):
     return 0
 
 
-def pick_model(f):
+AUTO_LABEL = "let Frida choose"
+
+
+def pick_model(f=None):
+    """Choose a model, or hand the choice back to Frida.
+
+    fetch_models returns {"models", "source", "error"} — this read it as a bare
+    list and sliced it, so /model raised `TypeError: unhashable type: 'slice'`
+    every single time it was called.
+    """
     pid = engine.STATE["provider"]
-    models = engine.fetch_models(pid, force=True)
+    label = engine.PROVIDERS[pid]["label"]
+    got = engine.fetch_models(pid, force=True)
+    models = list(got.get("models") or [])
     if not models:
-        ui.err("couldn't fetch the model list — check the key and the network")
+        ui.err("couldn't list %s's models: %s" % (label, got.get("error") or "no answer"))
         return
+    if got.get("source") != "live":
+        ui.note("showing the built-in list — " + (got.get("error") or "couldn't reach the provider"))
+
     current = engine.STATE["models"].get(pid)
-    options = [{"label": m, "detail": "current" if m == current else ""} for m in models[:12]]
-    choice = ui.ask(f"which {engine.PROVIDERS[pid]['label']} model?", options, allow_other=True)
+    best = engine.preferred_model(pid, models)
+
+    options = [{"label": AUTO_LABEL,
+                "detail": ("currently " + best) if best else "pick the best available"}]
+    for m in models[:14]:
+        marks = []
+        if m == current:
+            marks.append("pinned")
+        if m == best:
+            marks.append("what Frida would pick")
+        options.append({"label": m, "detail": " · ".join(marks)})
+
+    choice = ui.ask("which %s model?" % label, options, allow_other=True,
+                    default=1 if not current else
+                    next((i for i, o in enumerate(options, 1)
+                          if o["label"] == current), 1))
     if choice is ui.CANCELLED or not str(choice).strip():
-        ui.note("left on " + (current or "the default"))
+        ui.note("left on " + (current or "automatic"))
+        return
+    if choice == AUTO_LABEL:
+        engine.STATE["models"].pop(pid, None)
+        engine.persist_state()
+        ui.ok("automatic — Frida will use " + (best or "the best model available"))
         return
     engine.STATE["models"][pid] = choice
     engine.persist_state()
-    ui.ok(f"pinned {choice}")
+    ui.ok("pinned " + choice)
 
 
 def show_cost():

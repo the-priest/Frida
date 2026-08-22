@@ -58,11 +58,42 @@ _TRACEBACK = re.compile(r"^Traceback \(most recent call last\):", re.M)
 # ==========================================================================
 # SANDBOX
 # ==========================================================================
+# A generated tool is code a language model wrote thirty seconds ago, and Frida
+# runs it. It used to inherit os.environ wholesale, which handed it the user's
+# SILICONFLOW_API_KEY, ZAI_API_KEY, GITHUB_TOKEN, AWS credentials and everything
+# else — while the sandbox has working network access. A tool that does
+# `print(os.environ["SILICONFLOW_API_KEY"])` is not even malicious; it's a
+# plausible accident. So the environment is now an allowlist: a CLI tool being
+# smoke-tested needs a PATH, a locale and a temp dir, and nothing else.
+_ENV_ALLOW = {
+    "PATH", "TERM", "TZ", "TMPDIR", "TEMP", "TMP",
+    "LANG", "LANGUAGE", "SHELL", "USER", "LOGNAME",
+    "PYTHONHASHSEED", "PYTHONDONTWRITEBYTECODE", "SYSTEMROOT", "COMSPEC",
+    "PATHEXT", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+}
+_ENV_LC = ("LC_",)
+# Belt and braces: even an allowlisted name is dropped if it looks like a secret,
+# in case this list ever grows carelessly.
+_ENV_SECRETISH = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL",
+                  "AUTH", "SESSION", "COOKIE", "LICENSE", "SIGNATURE")
+
+
+def _looks_secret(name):
+    up = name.upper()
+    return any(word in up for word in _ENV_SECRETISH)
+
+
 def _sandbox_env(home):
-    """Environment for a generated tool: its own HOME, no colour forced either
-    way, and the locale pinned to UTF-8 so a ✓ in a help string can't crash the
-    run for reasons that have nothing to do with the code."""
-    env = dict(os.environ)
+    """Environment for a generated tool: its own HOME, an allowlisted PATH and
+    locale, no inherited credentials, and UTF-8 pinned so a ✓ in a help string
+    can't crash the run for reasons that have nothing to do with the code."""
+    env = {}
+    for name, value in os.environ.items():
+        if _looks_secret(name):
+            continue
+        if name in _ENV_ALLOW or name.startswith(_ENV_LC):
+            env[name] = value
+    env.setdefault("PATH", os.defpath)
     env["HOME"] = str(home)
     env["XDG_CONFIG_HOME"] = str(Path(home) / ".config")
     env["XDG_DATA_HOME"] = str(Path(home) / ".local" / "share")

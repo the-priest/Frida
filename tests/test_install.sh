@@ -16,10 +16,10 @@ bash -n install.sh
 check "install.sh parses" $?
 
 # 1. the network manifest must list exactly what is in the package
-declared="$(sed -n 's/^# MODULES: //p' install.sh | tr ' ' '\n' | sort | tr -d '\r')"
+declared="$(sed -n 's/^MODULES="\(.*\)"$/\1/p' install.sh | tr ' ' '\n' | sort | tr -d '\r')"
 actual="$(ls frida/*.py | xargs -n1 basename | sort)"
 [ "$declared" = "$actual" ]
-check "install.sh's MODULES manifest matches frida/*.py" $?
+check "install.sh's MODULES list matches frida/*.py" $?
 if [ "$declared" != "$actual" ]; then
   echo "       declared: $(echo "$declared" | tr '\n' ' ')"
   echo "       actual:   $(echo "$actual" | tr '\n' ' ')"
@@ -55,7 +55,21 @@ rc=$?
 [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ]
 check "the installed frida can run doctor" $?
 
-# 4. upgrading over an old install must not leave a stale module behind
+# 4. piped from curl, $0 is "bash" — nothing may read the script's own file
+grep -q 'sed .*"\$0"' install.sh && piped_bug=1 || piped_bug=0
+[ "$piped_bug" = "0" ]
+check "nothing reads \$0 (curl | bash gives \$0 = bash)" $?
+
+PIPED="$(mktemp -d)"
+# Simulate the curl path: no argv[0] file, and no frida/ next to the "script".
+( cd "$PIPED" && HOME="$PIPED" bash -c "$(cat "$ROOT/install.sh")" >"$PIPED/log" 2>&1 )
+grep -qi "can't read bash\|No such file or directory" "$PIPED/log" && piped_ok=1 || piped_ok=0
+[ "$piped_ok" = "0" ]
+check "piped install gets past the module list" $?
+[ "$piped_ok" = "1" ] && sed -n '1,12p' "$PIPED/log" | sed 's/^/       /'
+rm -rf "$PIPED"
+
+# 5. upgrading over an old install must not leave a stale module behind
 echo "raise SystemExit('stale module ran')" > "$SANDBOX/.local/share/frida/frida/zombie.py"
 HOME="$SANDBOX" bash install.sh >/dev/null 2>&1
 [ ! -f "$SANDBOX/.local/share/frida/frida/zombie.py" ]

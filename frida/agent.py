@@ -140,6 +140,35 @@ class Tool:
         self.last_run = None
         return snap
 
+    def prompt_view(self):
+        """The conversation as the MODEL should see it.
+
+        Every assistant turn carries a full copy of the file, so a tool changed
+        ten times sent ten copies of it — most of them superseded — on every
+        single call. Only the newest code is true; the older turns matter only
+        as a record of what was asked for.
+
+        Each superseded turn collapses to a fixed one-line placeholder. Fixed
+        matters: the replacement for turn 3 never changes once turn 4 exists, so
+        the prompt keeps a stable prefix and providers that cache prefixes still
+        get a hit. (Cached input on DeepSeek is about a fifth the price of fresh
+        input, so breaking the prefix to save tokens would be a bad trade.)
+        """
+        last_assistant = -1
+        for i, m in enumerate(self.messages):
+            if m.get("role") == "assistant":
+                last_assistant = i
+        view, superseded = [], 0
+        for i, m in enumerate(self.messages):
+            if m.get("role") == "assistant" and i != last_assistant:
+                superseded += 1
+                view.append({"role": "assistant",
+                             "content": "[revision %d — superseded by the file "
+                                        "shown below]" % superseded})
+            else:
+                view.append(m)
+        return view
+
     def _here(self, note):
         return {"ver": self.ver, "code": self.code, "note": note,
                 "messages": list(self.messages)}
@@ -392,7 +421,7 @@ class Frida:
 
     def _full_write(self, instruction, board):
         convo = ([{"role": "system", "content": P["system"]}]
-                 + self.tool.messages
+                 + self.tool.prompt_view()
                  + [{"role": "user", "content": instruction}])
         return self._call(convo, board=board, tier="build",
                           temperature=engine.BUILD_TEMPERATURE,

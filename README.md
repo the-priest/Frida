@@ -92,6 +92,35 @@ checklist degrades to plain scrolling lines the moment you pipe it somewhere.
 
 ---
 
+## Providers and models
+
+Five providers, all OpenAI-compatible:
+
+| | key | default model |
+|---|---|---|
+| SiliconFlow *(default)* | `SILICONFLOW_API_KEY` | `deepseek-ai/DeepSeek-V4-Flash-0731` |
+| Z.ai | `ZAI_API_KEY` | `glm-5.3` |
+| Groq | `GROQ_API_KEY` | best available |
+| Google AI Studio | `GOOGLE_API_KEY` | `gemini-2.5-pro` |
+| Novita | `NOVITA_API_KEY` | `deepseek/deepseek-v4-flash` |
+
+Frida wants **DeepSeek V4 Flash 0731** on SiliconFlow: same architecture as the
+original V4 Flash, re-post-trained for agentic work — which is exactly this
+program's whole day, reading a file, patching it, reading the failure, patching
+again. Pro is stronger in the abstract and several times the price; Flash wins
+the tight edit loop that dominates the spend.
+
+The preference is a ranked list matched against what the provider actually
+offers, not a hardcoded id — so if `0731` isn't on your account yet it falls to
+plain Flash rather than 404-ing every call. `/model` shows the list with
+Frida's pick marked, and `let Frida choose` hands the decision back.
+
+```bash
+export ZAI_API_KEY=...            # or just run /key inside the workshop
+frida --provider zai              # this run
+frida                             # then /model to pin glm-5.3
+```
+
 ## Set an API key
 
 Frida asks for one the first time. Or set it yourself:
@@ -231,6 +260,40 @@ idiom as the wordmark:
 ```
 
 It sticks between sessions, and `/big <anything>` draws one line on demand.
+
+### What Frida does with your key
+
+The key is stored in `~/.config/frida/config.json` at mode `0600`, and that is
+the only place it is written.
+
+- **Typing it doesn't echo, and isn't recorded.** `input()` echoes, and because
+  the workshop loads readline it also appends to the history buffer — which
+  Frida writes to disk. A pasted key was landing in
+  `~/.local/share/frida/history` in plain text. Key entry now uses `getpass`,
+  which readline never sees, and the history file is filtered for anything
+  key-shaped on the way out and written `0600`.
+- **Generated tools cannot see it.** Frida runs code a model wrote seconds ago,
+  and that code used to inherit the whole environment — your provider keys,
+  `GITHUB_TOKEN`, cloud credentials — with working network access. A tool doing
+  `os.environ["SILICONFLOW_API_KEY"]` isn't even malicious; it's a plausible
+  accident. The sandbox environment is now an allowlist: `PATH`, a locale, a
+  temp dir, and a throwaway `HOME`. Nothing else.
+- **Errors are redacted.** Provider error bodies get shown to you and fed back
+  to the model. If one ever echoes your key, it is masked first.
+- **Released repos are clean** — verified by the test suite, not by assertion.
+
+### It sends less
+
+Every assistant turn holds a full copy of your file, and all of them used to go
+back to the model on every call: ten changes to a 300-line tool meant ten copies
+of mostly-superseded code in each request. Superseded turns now collapse to a
+one-line placeholder — **about 90% fewer input tokens by the tenth turn** — while
+the current file is still sent in full and every instruction you gave is kept.
+
+The placeholders are fixed, so the prompt prefix stays byte-stable as the
+conversation grows and providers that cache prefixes still hit their cache.
+That matters: cached input on DeepSeek is roughly a fifth the price of fresh
+input, so saving tokens by rewriting history would have been a bad trade.
 
 ### Nothing you build is lost
 
