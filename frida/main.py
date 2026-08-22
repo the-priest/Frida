@@ -338,10 +338,6 @@ def build_parser():
     p.add_argument("--model", default=None, metavar="ID", help="pin a model for this run")
     p.add_argument("--json", action="store_true", help="machine-readable output where it applies")
     p.add_argument("--no-banner", action="store_true", help="skip the wordmark")
-    p.add_argument("--theme", default=None, metavar="NAME",
-                   help="ember, matrix, ice, synthwave, paper")
-    p.add_argument("--plain", action="store_true",
-                   help="no animation — same output, nothing moves")
     p.add_argument("--version", action="version", version="frida " + __version__)
     return p
 
@@ -357,12 +353,6 @@ IN_SESSION_ONLY = frozenset(
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-
-    ui.set_theme(args.theme or engine.STATE.get("theme") or "ember")
-    if args.plain:
-        ui.set_motion(False)
-    if args.theme:
-        engine.STATE["theme"] = args.theme
 
     if args.provider:
         if args.provider not in engine.PROVIDERS:
@@ -406,7 +396,7 @@ def main(argv=None):
             return 1
         f.tool = agent.Tool.restore(record, f.provider)
         if not args.no_banner:
-            ui.boot(__version__)
+            ui.banner(__version__)
         ui.ok(f"resumed {f.tool.name} — {len(f.tool.code.splitlines())} lines")
         if not ensure_key():
             return 1
@@ -429,7 +419,7 @@ def main(argv=None):
 
     if request:
         if not args.no_banner:
-            ui.boot(__version__)
+            ui.banner(__version__)
         tool = f.build(request, install=not args.no_install,
                        ask=not args.yes)
         if not tool.code:
@@ -442,7 +432,7 @@ def main(argv=None):
         return 0
 
     if not args.no_banner:
-        ui.boot(__version__)
+        ui.banner(__version__)
         ui.tribute()
     return repl(f)
 

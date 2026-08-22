@@ -259,13 +259,11 @@ def h_build(f, arg):
 @command("new", "start a fresh tool", group="make", aliases=("reset",))
 def h_new(f, arg):
     from . import agent
-    kept = f.tool.name if f.tool.code else ""
-    if kept:
+    if f.tool.code:
         f.tool.save()
+        ui.note("kept " + f.tool.name + " — /tools to come back to it")
     f.tool = agent.Tool(f.provider)
     ui.ok("fresh start")
-    if kept:
-        ui.note("kept " + kept + " — /tools to come back to it")
     return None
 
 
@@ -507,39 +505,6 @@ def h_freeze(f, arg):
 
 
 # ---- session -------------------------------------------------------------
-@command("theme", "change how Frida looks", group="session", arg="[name]",
-         free_text=True)
-def h_theme(f, arg):
-    want = arg.strip().lower()
-    if want in ("", "?", "list"):
-        ui.blank()
-        ui.rule("themes")
-        ui.blank()
-        for name in ui.THEMES:
-            here = name == ui.THEME
-            ui.set_theme(name)
-            mark = ui.c("lime", ui.G.done) if here else ui.c("faint", " ")
-            ui.out("  %s  %s  %s   %s%s%s%s" % (
-                mark,
-                ui.c("amber", name.ljust(10), bold=True),
-                ui.c("grey", ui.THEME_BLURB.get(name, "")[:28].ljust(29)),
-                ui.c("cream", "text "), ui.c("lime", ui.G.done + " "),
-                ui.c("red", ui.G.fail + " "), ui.c("teal", "tool")))
-        ui.set_theme(ui.THEME)
-        ui.blank()
-        ui.note("/theme matrix   ·   it sticks between sessions")
-        ui.blank()
-        return None
-    if not ui.set_theme(want):
-        ui.err("no theme called " + want)
-        ui.note("there is: " + ", ".join(ui.THEMES))
-        return None
-    engine.STATE["theme"] = want
-    engine.persist_state()
-    ui.ok("theme: " + want + "  " + ui.c("grey", ui.THEME_BLURB.get(want, "")))
-    return None
-
-
 @command("model", "choose the model", group="session")
 def h_model(f, arg):
     from . import main as _main

@@ -50,29 +50,6 @@ STEP_SHIP = "Hand it over"
 # ==========================================================================
 # THE TOOL UNDER CONSTRUCTION
 # ==========================================================================
-def _previewer(board):
-    """Feed the board the tail of the code as the model writes it.
-
-    The model answers in markdown, so during a build the interesting part is
-    inside a fence and the prose around it is not. Showing the fence markers
-    and the chatter would make this noise; showing the code makes it a window.
-    """
-    def show(text, chars, secs):
-        body = text
-        fence = text.find("```")
-        if fence != -1:
-            body = text[text.find("\n", fence) + 1:] if "\n" in text[fence:] else ""
-            close = body.find("```")
-            if close != -1:
-                body = body[:close]
-        elif len(text) < 40:
-            return                       # nothing worth showing yet
-        rate = int(chars / max(0.5, secs))
-        board.set_detail("%s chars  ·  %s/s" % (f"{chars:,}", f"{rate:,}"))
-        board.set_preview(body, keep=8)
-    return show
-
-
 class Tool:
     """Everything Frida knows about the tool it is currently building."""
 
@@ -322,10 +299,7 @@ class Frida:
         board.start(step_label, "thinking")
         t0 = time.time()
         prior = _last_user(self.tool.messages)
-        with engine.watching_generation(_previewer(board)):
-            return self._write_inner(instruction, board, step_label, t0, prior)
 
-    def _write_inner(self, instruction, board, step_label, t0, prior):
         if self.tool.code and not engine._wants_fresh_build(instruction):
             res = self._call_edit(instruction, prior, board)
             if res is None:
@@ -607,8 +581,6 @@ class Frida:
             ui.say(reply)
         if delivered and delivered.get("installed"):
             inst = delivered["installed"]
-            ui.sweep("  " + ui.c("lime", ui.G.done + " " + self.tool.name
-                                 + " is ready"), colour="lime")
             ui.file_card(inst["path"], f"{self.tool.name} is installed",
                          run_hint=f"{self.tool.name} --help")
             if not inst.get("on_path"):

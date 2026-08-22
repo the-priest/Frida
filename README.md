@@ -156,47 +156,6 @@ is a pause, not a cage: you can `/code` to look at what you have, `/save` it,
 and come back to the same question. Tab completes, `↑` recalls across sessions,
 `ctrl-c` stops the current step without killing the session.
 
-### It should look like something
-
-Five themes. `/theme` on its own shows them all, swatched, and it sticks
-between sessions.
-
-```
-── themes ──────────────────────────────────────────
-  ✔  ember       warm amber · the default       text ✔ ✗ tool
-     matrix      green phosphor                 text ✔ ✗ tool
-     ice         cold blues · easiest at 3am    text ✔ ✗ tool
-     synthwave   loud. gloriously loud          text ✔ ✗ tool
-     paper       for light terminals            text ✔ ✗ tool
-```
-
-There is animation, and there is a rule about it: **it plays on something that
-happens rarely, or it does not play.** The wordmark sweeps in once at startup.
-A finished tool gets one pass of light when it lands. The things you do a
-hundred times a day stay perfectly still, because a flourish you see once a
-session is delight and the same flourish on every keystroke is a tax.
-
-The one piece of theatre that is also load-bearing is the live code view. While
-the model writes, the last few lines of your tool appear under the checklist as
-they arrive:
-
-```
-  ⠦ Write jointcalc
-    › thinking  4s
-      1,840 chars  ·  575/s
-      │ def split(total, ratio):
-      │     weed = total * ratio
-      │     return weed, total - weed
-```
-
-A spinner for ninety seconds tells you nothing. This tells you it understood
-the request, and lets you hit `ctrl-c` at second four instead of second ninety.
-
-`--plain` (or `FRIDA_PLAIN=1`) turns all motion off and changes nothing else.
-Motion is off automatically whenever output isn't a terminal, so piping and CI
-logs stay clean. `FORCE_COLOR=1` keeps the colours when you *do* want to pipe
-somewhere that understands them — `frida code | less -R`.
-
 ### Nothing you build is lost
 
 Every accepted change is a version. `/versions` lists them, `/undo` steps back,

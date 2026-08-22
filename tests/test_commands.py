@@ -211,63 +211,6 @@ check("revert refuses a version that isn't there", t.revert(99) is None)
 check("undo on a fresh tool is harmless", agent.Tool().undo() is None)
 
 print()
-print("== themes and motion ==")
-
-for name in ui.THEMES:
-    check(f"theme {name} sets every colour role",
-          set(ui.THEMES[name]) == set(ui.THEMES["ember"]),
-          str(set(ui.THEMES["ember"]) ^ set(ui.THEMES[name])))
-    check(f"theme {name} has a blurb", bool(ui.THEME_BLURB.get(name)))
-
-before = ui.THEME
-check("set_theme swaps the palette", ui.set_theme("matrix") and ui.THEME == "matrix")
-check("an unknown theme is refused", ui.set_theme("chartreuse") is False)
-check("a refused theme leaves the old one alone", ui.THEME == "matrix")
-ui.set_theme(before)
-
-check("256-colour fallback stays in range",
-      all(16 <= ui._rgb_to_256(*v) <= 255
-          for pal in ui.THEMES.values() for v in pal.values()))
-
-# Motion must never fire when the output isn't a terminal — a log file or a
-# pipe full of cursor-movement escapes is worse than no animation at all.
-real_tty = ui.is_tty
-ui.is_tty = lambda: False
-check("no motion when stdout isn't a tty", ui.motion_enabled() is False)
-ui.is_tty = lambda: True
-os.environ["FRIDA_PLAIN"] = "1"
-check("FRIDA_PLAIN turns motion off", ui.motion_enabled() is False)
-os.environ.pop("FRIDA_PLAIN")
-ui.set_motion(False)
-check("--plain turns motion off", ui.motion_enabled() is False)
-ui.set_motion(True)
-ui.is_tty = real_tty
-
-print()
-print("== layout ==")
-
-import io                                              # noqa: E402
-buf = io.StringIO()
-ui._stream = lambda: buf
-ui.blank(); ui.blank(); ui.blank()
-check("blank lines collapse", buf.getvalue() == "", repr(buf.getvalue()))
-buf.truncate(0), buf.seek(0)
-ui.out("something"); ui.blank(); ui.blank()
-check("one blank line survives after content",
-      buf.getvalue() == "something\n\n", repr(buf.getvalue()))
-buf.truncate(0), buf.seek(0)
-ui.gap()
-check("gap is a deliberate double", buf.getvalue() == "\n\n", repr(buf.getvalue()))
-buf.truncate(0), buf.seek(0)
-for fn in (ui.ok, ui.err, ui.warn, ui.info):
-    buf.truncate(0), buf.seek(0)
-    fn("x")
-    line = ui.plain(buf.getvalue())
-    check(f"{fn.__name__}() sits on the left margin",
-          line.startswith("  ") and not line.startswith("   "), repr(line))
-ui._stream = lambda: sys.stderr
-
-print()
 if FAILURES:
     print(f"something failed: {len(FAILURES)}")
     for f_ in FAILURES:

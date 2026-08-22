@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "2.1.0"
+__version__ = "2.0.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -506,12 +506,11 @@ STATE = {
     "keys": _initial_keys(),
     "provider": load_config().get("provider") or DEFAULT_PROVIDER,
     "models": load_config().get("models", {}),   # {provider_id: chosen_model}
-    "theme": load_config().get("theme", "ember"),
 }
 
 def persist_state():
     return save_config({"keys": STATE["keys"], "provider": STATE["provider"],
-                        "models": STATE["models"], "theme": STATE.get("theme", "ember")})
+                        "models": STATE["models"]})
 
 # --------------------------------------------------------------------------
 # LIVE MODEL CATALOG  -- ask each provider what YOUR key can actually call
@@ -1181,15 +1180,12 @@ def _http_post_stream(url, headers, body, idle_timeout=None, total_timeout=None,
                     finish = ch["finish_reason"]
             if on_progress:
                 now = time.time()
-                # Four ticks a second when something is actually drawing the text
-                # (the live code preview), one a second when it's only a counter.
-                every = 0.25 if GEN_WATCHER[0] else 1.0
-                if now - last_tick >= every:
+                if now - last_tick >= 1.0:     # at most one activity event a second
                     last_tick = now
                     try:
                         on_progress(sum(len(x) for x in content),
                                     sum(len(x) for x in reasoning),
-                                    now - started, "".join(content))
+                                    now - started)
                     except Exception:
                         pass
 
@@ -1637,18 +1633,12 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
     total_timeout = MODEL_TIMEOUT.get(tier, MODEL_TIMEOUT["cheap"])
     model = None                     # bound by the loop; referenced by _post below
 
-    def _progress(nchars, nreason, elapsed, text=""):
+    def _progress(nchars, nreason, elapsed):
         # Live feedback while the model writes. This is what turns "the spinner
         # has been going for two minutes, is it dead?" into a visible word count,
         # and it keeps the SSE relay's idle watchdog fed for the whole generation.
         _emit("gen", chars=nchars, reasoning=nreason,
               secs=int(elapsed), model=model)
-        watcher = GEN_WATCHER[0]
-        if watcher:
-            try:
-                watcher(text, nchars, elapsed)
-            except Exception:
-                pass
 
     provider_degraded = [False]     # set once a 5xx exhausts a model's retry budget
 
@@ -3152,28 +3142,6 @@ def _wants_fresh_build(text):
 # narrating itself, not a decorative animation.
 # ==========================================================================
 _ACTIVITY = threading.local()
-
-# Set while something is drawing the model's output as it streams in. A single
-# slot rather than a list: there is one terminal, and exactly one thing may own
-# the live region at a time.
-GEN_WATCHER = [None]
-
-
-class watching_generation:
-    """`with engine.watching_generation(fn):` — fn(text, chars, secs) as it streams."""
-
-    def __init__(self, fn):
-        self.fn = fn
-        self.prev = None
-
-    def __enter__(self):
-        self.prev = GEN_WATCHER[0]
-        GEN_WATCHER[0] = self.fn
-        return self
-
-    def __exit__(self, *exc):
-        GEN_WATCHER[0] = self.prev
-        return False
 
 def _emit(kind, **data):
     """Push one activity event to the channel bound to THIS build thread, if any.
