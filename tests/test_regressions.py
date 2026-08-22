@@ -8,6 +8,7 @@ reproduced first and fixed second.
     python3 tests/test_regressions.py
 """
 
+import io
 import math
 import os
 import pathlib
@@ -335,6 +336,98 @@ for bad in ("../../.bashrc", "/etc/passwd", "..", "a/../../b"):
     check(f"tool name {bad!r} cannot escape ~/.local/bin",
           "/" not in cleaned and ".." not in cleaned and cleaned != "",
           cleaned)
+
+print()
+print("== what the HUD reports about a run ==")
+
+# harness.verify returns {"cases": [...], "ok": bool}. The HUD and /status were
+# written against {"passed", "total"} — keys that never existed — so a tool that
+# had just passed every case still displayed "untested".
+class _Ran:
+    code = "x\n" * 40
+    ver = "1.0.0"
+    name = "adventure"
+    history = []
+    last_run = {"cases": [{"ok": True}] * 3, "ok": True}
+
+
+class _Failed(_Ran):
+    last_run = {"cases": [{"ok": True}, {"ok": False}, {"ok": True}], "ok": False}
+
+
+class _Never(_Ran):
+    last_run = None
+
+
+check("a passing run is counted", ui.run_tally(_Ran()) == (3, 3, True),
+      str(ui.run_tally(_Ran())))
+check("a failing run is counted", ui.run_tally(_Failed()) == (2, 3, False),
+      str(ui.run_tally(_Failed())))
+check("a tool that never ran reports nothing", ui.run_tally(_Never()) == (0, 0, False))
+check("the next move after a pass is to run it",
+      ui.next_moves(_Ran())[0] == "run", str(ui.next_moves(_Ran())))
+check("the next move after a failure is to fix it",
+      ui.next_moves(_Failed())[0] == "fix", str(ui.next_moves(_Failed())))
+check("the next move before any run is to test it",
+      ui.next_moves(_Never())[0] == "test")
+
+print()
+print("== a bare flag runs the tool, it does not brief the model ==")
+
+# Typing `--help` was sent to the model as an instruction: 43 seconds and real
+# money spent adding a feature nobody asked for.
+for line in ("--help", "--version", "-v", "--json out.csv", "-la /tmp"):
+    kind, cmd, arg = commands.resolve(line)
+    check(f"{line!r} runs the tool",
+          kind == commands.RUN and cmd.name == "run" and arg == line,
+          f"{kind}/{getattr(cmd, 'name', cmd)}")
+
+for line in ("--help should also mention the restart command",
+             "--verbose but only for errors",
+             "add a --json flag"):
+    check(f"{line!r} is still an instruction",
+          commands.resolve(line)[0] == commands.SAY)
+
+print()
+print("== big text ==")
+
+check("every letter and digit has a glyph",
+      all(ch in ui._BIG for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+check("every glyph is exactly three rows",
+      all(len(v) == 3 for v in ui._BIG.values()))
+check("each glyph's rows are the same width",
+      all(len({len(r) for r in v}) == 1 for k, v in ui._BIG.items()),
+      str([k for k, v in ui._BIG.items() if len({len(r) for r in v}) != 1]))
+rows = ui.big_rows("frida")
+check("big text renders three rows", len(rows) == 3)
+check("big text is wider than the plain string", ui.big_width("frida") > len("frida"))
+
+# Too wide to draw must fall back to the plain string, not a broken picture.
+buf2 = io.StringIO()
+ui._stream = lambda: buf2
+ui.width = lambda default=80: 20
+ui.big("a-very-long-tool-name-indeed")
+check("big text too wide for the terminal falls back to plain",
+      "a-very-long-tool-name-indeed" in ui.plain(buf2.getvalue())
+      and len(buf2.getvalue().splitlines()) == 1)
+ui.width = lambda default=80: 80
+ui._stream = lambda: sys.stderr
+
+print()
+print("== the terminal is named, so doctor can say where the font lives ==")
+
+for env, expect in [({"KITTY_WINDOW_ID": "1"}, "kitty"),
+                    ({"TERM": "alacritty"}, "alacritty"),
+                    ({"TERM": "foot"}, "foot"),
+                    ({"WEZTERM_PANE": "0"}, "wezterm"),
+                    ({"KONSOLE_VERSION": "22"}, "konsole")]:
+    saved = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(env)
+    name, keys, _cfg = engine.terminal()
+    os.environ.clear()
+    os.environ.update(saved)
+    check(f"{expect} is recognised", name == expect and bool(keys), name)
 
 print()
 if FAILURES:

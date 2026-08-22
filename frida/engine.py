@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -217,6 +217,60 @@ def app_data_dir():
     if IS_MAC:
         return Path.home() / "Library" / "Application Support" / "Frida"
     return Path.home() / ".local" / "share" / "frida"
+
+def parses(code):
+    """(ok, reason). A cheap syntax gate for code that didn't come from a model."""
+    import ast as _a
+    try:
+        _a.parse(code or "")
+        return True, ""
+    except SyntaxError as e:
+        return False, "line %s: %s" % (e.lineno, e.msg)
+    except (ValueError, MemoryError, RecursionError) as e:
+        return False, str(e)
+
+
+def terminal():
+    """Identify the terminal emulator and how to change its font size.
+
+    Frida cannot make your font bigger — font size belongs to the terminal, not
+    to the program drawing inside it. What it can do is stop you having to go
+    and look it up.
+    """
+    env = os.environ
+    def has(*names):
+        return any(env.get(n) for n in names)
+
+    term = (env.get("TERM") or "").lower()
+    prog = (env.get("TERM_PROGRAM") or "").lower()
+
+    if has("KITTY_WINDOW_ID") or "kitty" in term:
+        return ("kitty", "ctrl + shift + =   (ctrl+shift+- smaller, "
+                "ctrl+shift+0 to reset)", "~/.config/kitty/kitty.conf: font_size 16")
+    if has("ALACRITTY_WINDOW_ID", "ALACRITTY_SOCKET") or "alacritty" in term:
+        return ("alacritty", "ctrl + =   (ctrl+- smaller, ctrl+0 to reset)",
+                "~/.config/alacritty/alacritty.toml: [font] size = 16")
+    if "foot" in term:
+        return ("foot", "ctrl + =   (ctrl+- smaller, ctrl+0 to reset)",
+                "~/.config/foot/foot.ini: font=monospace:size=16")
+    if has("WEZTERM_PANE", "WEZTERM_EXECUTABLE"):
+        return ("wezterm", "ctrl + =   (ctrl+- smaller, ctrl+0 to reset)",
+                "~/.wezterm.lua: config.font_size = 16")
+    if has("KONSOLE_VERSION", "KONSOLE_DBUS_SESSION"):
+        return ("konsole", "ctrl + =   (or Settings → Edit Current Profile → "
+                "Appearance → Font)", "")
+    if has("GNOME_TERMINAL_SCREEN") or prog == "gnome-terminal":
+        return ("gnome-terminal", "ctrl + +   (ctrl+- smaller, ctrl+0 to reset)",
+                "Preferences → your profile → Text → Custom font")
+    if prog == "vscode":
+        return ("vs code", "settings: terminal.integrated.fontSize", "")
+    if has("VTE_VERSION"):
+        return ("a vte terminal", "ctrl + +   (ctrl+- smaller)", "")
+    if term.startswith("xterm"):
+        return ("xterm", "ctrl + right-click → choose a larger font",
+                "~/.Xresources: XTerm*faceSize: 16")
+    return ("", "", "")
+
 
 def data_dir():
     """Where Frida keeps things that should outlive a session (history, sessions)."""
@@ -507,11 +561,16 @@ STATE = {
     "provider": load_config().get("provider") or DEFAULT_PROVIDER,
     "models": load_config().get("models", {}),   # {provider_id: chosen_model}
     "theme": load_config().get("theme", "ember"),
+    "big": load_config().get("big", False),
 }
 
 # Set from --theme / --model, which apply to one run and must never be written
 # to config.json by an unrelated save later in the session.
 RUN_OVERRIDES = {"theme": "", "model": None}
+
+# The model that actually answered most recently. STATE["models"] only holds a
+# model you PINNED, so on a default setup the HUD had nothing to show.
+LAST_MODEL = [""]
 
 
 def persist_state():
@@ -529,7 +588,8 @@ def persist_state():
     if RUN_OVERRIDES.get("theme") and theme == RUN_OVERRIDES["theme"]:
         theme = load_config().get("theme", "ember")
     return save_config({"keys": STATE["keys"], "provider": STATE["provider"],
-                        "models": models, "theme": theme})
+                        "models": models, "theme": theme,
+                        "big": bool(STATE.get("big"))})
 
 # --------------------------------------------------------------------------
 # LIVE MODEL CATALOG  -- ask each provider what YOUR key can actually call
@@ -1845,6 +1905,7 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
                 _emit("stage", text=f"{model} declined this one — trying the next model")
                 refusals.append((model, reply.strip()[:400]))
                 continue
+            LAST_MODEL[0] = model
             out = {"reply": reply, "model": model, "provider": pid,
                    "usage": data.get("usage") or {}}
             if finish == "length":
@@ -1895,6 +1956,7 @@ def call_model(messages, provider_id=None, temperature=0.3, _fallback_chain=None
                                     last = f"{model}: empty reply from {_HOST_OK[pid]}"
                                     continue
                                 record_usage(pid, model, data.get("usage") or {})
+                                LAST_MODEL[0] = model
                                 out = {"reply": reply, "model": model, "provider": pid,
                                        "usage": data.get("usage") or {}}
                                 if finish == "length":

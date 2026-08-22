@@ -1,6 +1,6 @@
 # Maintainer: Luka <the-priest>
 pkgname=frida-toolsmith
-pkgver=2.2.0
+pkgver=2.3.0
 pkgrel=1
 pkgdesc="Describe a command-line tool, get a working one — a terminal toolsmith with no GUI anywhere in it"
 arch=('any')

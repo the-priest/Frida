@@ -140,6 +140,9 @@ def doctor(as_json=False):
           "managed venv ready" if engine._venv_python() else "built on first freeze")
     on_path = ship._on_path(ship.BIN_DIR)
     check("~/.local/bin on PATH", on_path, "" if on_path else ship.path_hint())
+    term_name, term_keys, _term_cfg = engine.terminal()
+    if term_name:
+        check("terminal", True, term_name)
 
     keyed = [engine.PROVIDERS[p]["label"] for p, k in engine.STATE["keys"].items()
              if (k or "").strip()]
@@ -171,6 +174,15 @@ def doctor(as_json=False):
         ui.blank()
     if any(not r["ok"] for r in rows):
         ui.note("everything marked ! is optional — Frida runs without it, just less well")
+    if term_keys:
+        # Frida draws big with /big, but the font itself belongs to the
+        # terminal — so at least say where the setting lives.
+        ui.blank()
+        ui.note("font too small? that's " + term_name + ", not Frida:")
+        ui.note("  " + term_keys)
+        if _term_cfg:
+            ui.note("  " + _term_cfg)
+        ui.note("  /big draws tool names and headings three rows tall")
     return 0
 
 
@@ -305,7 +317,8 @@ def show_hud(f):
         tilde = "" if u.get("cost_complete") else "~"
         cost = "%s$%.4f" % (tilde, u["cost_usd"])
     pid = engine.STATE.get("provider")
-    model = (engine.STATE.get("models") or {}).get(pid) or ""
+    model = ((engine.STATE.get("models") or {}).get(pid)
+             or engine.LAST_MODEL[0] or "")
     if "/" in model:
         model = model.split("/")[-1]
     ui.hud(f.tool, model=model[:28], cost=cost,
@@ -351,6 +364,8 @@ def build_parser():
     p.add_argument("--no-banner", action="store_true", help="skip the wordmark")
     p.add_argument("--theme", default=None, metavar="NAME",
                    help="ember, matrix, ice, synthwave, paper")
+    p.add_argument("--big", action="store_true",
+                   help="draw tool names and headings three rows tall")
     p.add_argument("--plain", action="store_true",
                    help="no animation — same output, nothing moves")
     p.add_argument("--version", action="version", version="frida " + __version__)
@@ -374,6 +389,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     ui.set_theme(args.theme or engine.STATE.get("theme") or "ember")
+    ui.set_big(args.big or bool(engine.STATE.get("big")))
     if args.plain:
         ui.set_motion(False)
     # --theme and --model are documented "for this run". They were written into

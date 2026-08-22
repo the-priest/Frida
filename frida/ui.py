@@ -1084,6 +1084,21 @@ def hairline(left="amber", right="teal"):
     out("  " + _gradient_rule(left=left, right=right))
 
 
+def run_tally(tool):
+    """(passed, total, all_good) from the last run — or (0, 0, False).
+
+    harness.verify returns {"cases": [...], "ok": bool}. The HUD was written
+    against {"passed", "total"}, which never existed, so a tool that had just
+    passed every case still reported "untested".
+    """
+    run = getattr(tool, "last_run", None) or {}
+    cases = run.get("cases")
+    if not isinstance(cases, list) or not cases:
+        return 0, 0, False
+    passed = sum(1 for case in cases if case.get("ok"))
+    return passed, len(cases), bool(run.get("ok"))
+
+
 def hud(tool=None, model="", cost="", session_versions=0):
     """One line telling you where you stand.
 
@@ -1099,13 +1114,12 @@ def hud(tool=None, model="", cost="", session_versions=0):
         left.append(c("teal", tool.name, bold=True))
         left.append(c("faint", "v" + tool.ver))
         left.append(c("grey", "%d ln" % lines_n))
-        run = tool.last_run or {}
-        total = run.get("total")
+        passed, total, good = run_tally(tool)
         if total:
-            passed = run.get("passed", 0)
-            good = passed == total
-            left.append((c("lime", "%d/%d " % (passed, total) + G.done) if good
-                         else c("red", "%d/%d %s" % (passed, total, G.fail))))
+            left.append(c("lime", "%d/%d %s" % (passed, total, G.done)) if good
+                        else c("red", "%d/%d %s" % (passed, total, G.fail)))
+        elif (tool.last_run or {}).get("blocked"):
+            left.append(c("amber", "not run"))
         else:
             left.append(c("faint", "untested"))
         if session_versions > 1:
@@ -1149,11 +1163,11 @@ def next_moves(tool):
     """What makes sense from here."""
     if tool is None or not tool.code:
         return []
-    run = tool.last_run or {}
+    passed, total, good = run_tally(tool)
     moves = []
-    if not run.get("total"):
+    if not total:
         moves.append("test")
-    elif run.get("passed") != run.get("total"):
+    elif not good:
         moves.append("fix")
     else:
         moves.append("run")
@@ -1311,3 +1325,90 @@ def typewriter(text, colour="cream", cps=900):
         show_cursor()
         raw("\r\033[2K")
     out(c(colour, text))
+
+# ==========================================================================
+# BIG TEXT
+# ==========================================================================
+# Frida cannot change your font — that belongs to the terminal emulator, and a
+# program that claims otherwise is lying. What it can do is draw at three times
+# the height using the same block idiom as the wordmark, so the things worth
+# seeing across the room are actually visible from there.
+_BIG = {
+    "A": ("▄▀▄", "█▀█", "▀ ▀"), "B": ("█▀▄", "█▀▄", "▀▀ "),
+    "C": ("▄▀▀", "█  ", "▀▀▀"), "D": ("█▀▄", "█ █", "▀▀ "),
+    "E": ("█▀▀", "█▀▀", "▀▀▀"), "F": ("█▀▀", "█▀▀", "▀  "),
+    "G": ("▄▀▀", "█ ▄", "▀▀▀"), "H": ("█ █", "█▀█", "▀ ▀"),
+    "I": ("▀█▀", " █ ", "▀▀▀"), "J": ("  █", "▄ █", "▀▀ "),
+    "K": ("█ ▄", "█▀▄", "▀ ▀"), "L": ("█  ", "█  ", "▀▀▀"),
+    "M": ("█▄▄▄█", "█ ▀ █", "▀   ▀"), "N": ("█▄ █", "█ ▀█", "▀  ▀"),
+    "O": ("▄▀▄", "█ █", "▀▀▀"), "P": ("█▀▄", "█▀▀", "▀  "),
+    "Q": ("▄▀▄", "█ █", "▀▀▄"), "R": ("█▀▄", "█▀▄", "▀ ▀"),
+    "S": ("▄▀▀", "▀▀▄", "▀▀ "), "T": ("▀█▀", " █ ", " ▀ "),
+    "U": ("█ █", "█ █", "▀▀▀"), "V": ("█ █", "█ █", " ▀ "),
+    "W": ("█   █", "█ ▄ █", "▀▀ ▀▀"), "X": ("▀▄▀", "▄▀▄", "▀ ▀"),
+    "Y": ("█ █", "▀█▀", " ▀ "), "Z": ("▀▀█", "▄▀ ", "▀▀▀"),
+    "0": ("▄▀▄", "█ █", "▀▀▀"), "1": (" █ ", " █ ", " ▀ "),
+    "2": ("▀▀▄", "▄▀ ", "▀▀▀"), "3": ("▀▀▄", " ▀▄", "▀▀ "),
+    "4": ("█ █", "▀▀█", "  ▀"), "5": ("█▀▀", "▀▀▄", "▀▀ "),
+    "6": ("▄▀▀", "█▀▄", "▀▀▀"), "7": ("▀▀█", "  █", "  ▀"),
+    "8": ("▄▀▄", "▄▀▄", "▀▀▀"), "9": ("▄▀▄", "▀▀█", "▀▀▀"),
+    "-": ("   ", "▀▀▀", "   "), "_": ("   ", "   ", "▀▀▀"),
+    ".": ("   ", "   ", " ▀ "), ",": ("   ", "   ", " ▄ "),
+    "!": (" █ ", " █ ", " ▀ "), "?": ("▀▀▄", " ▀ ", " ▀ "),
+    ":": (" ▄ ", "   ", " ▀ "), "/": ("  ▄", " ▀ ", "▄  "),
+    "+": ("   ", "▄█▄", " ▀ "), "*": ("▄▀▄", "▀▄▀", "   "),
+    "%": ("█ ▄", " ▀ ", "▄ ▀"), "#": ("█▄█", "█▄█", "▀ ▀"),
+    " ": ("  ", "  ", "  "),
+}
+
+BIG_MODE = False
+
+
+def set_big(on):
+    global BIG_MODE
+    BIG_MODE = bool(on)
+
+
+def big_rows(text):
+    """The three rows of `text` drawn large. Unknown characters become spaces."""
+    rows = ["", "", ""]
+    for ch in str(text).upper():
+        glyph = _BIG.get(ch, _BIG[" "])
+        for i in range(3):
+            rows[i] += glyph[i] + " "
+    return [r.rstrip() for r in rows]
+
+
+def big_width(text):
+    return max((cells(r) for r in big_rows(text)), default=0)
+
+
+def big(text, colour="amber", indent=2, fade=True):
+    """Draw `text` three rows tall, fading top to bottom on truecolor."""
+    rows = big_rows(text)
+    room = width() - indent
+    if not rows or big_width(text) > room:
+        # Too wide to draw large — say it small rather than draw it broken.
+        out(" " * indent + c(colour, str(text), bold=True))
+        return
+    base = _RGB.get(colour, _RGB["amber"])
+    for i, row in enumerate(rows):
+        if fade and DEPTH >= 24:
+            level = (1.0, 0.86, 0.66)[i]
+            rgb = tuple(int(v * level) for v in base)
+            out(" " * indent + BOLD + _paint(row, rgb) + RESET)
+        else:
+            out(" " * indent + c(colour, row, bold=True))
+
+
+def headline(text, colour="amber", sub=""):
+    """A heading, large when big mode is on and quiet when it isn't."""
+    blank()
+    if BIG_MODE:
+        big(text, colour)
+        if sub:
+            out("  " + c("grey", sub))
+    else:
+        out("  " + c(colour, str(text), bold=True)
+            + (("  " + c("grey", sub)) if sub else ""))
+    blank()

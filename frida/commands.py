@@ -28,6 +28,7 @@ you the thing you were trying to protect.
 
 import os
 import shlex
+import shutil
 
 from . import engine, ship, ui
 
@@ -116,6 +117,15 @@ def resolve(line):
 
     head, _, tail = body.partition(" ")
     tail = tail.strip()
+
+    # A line that is nothing but flags means "run it with these". Typing
+    # `--help` at the prompt used to be sent to the model as an instruction:
+    # it spent 43 seconds and real money adding a feature nobody asked for,
+    # when the user just wanted to see the tool's own help.
+    if (not slashed and head.startswith("-") and len(head) > 1
+            and (not tail or _looks_like_argv(tail))):
+        return RUN, lookup("run"), body
+
     cmd = lookup(head)
 
     if slashed:
@@ -587,6 +597,105 @@ def h_theme(f, arg):
     return None
 
 
+@command("big", "draw headings three rows tall", group="session",
+         arg="[on|off|text]", free_text=True)
+def h_big(f, arg):
+    want = arg.strip().lower()
+    if want and want not in ("on", "off", "toggle"):
+        ui.blank()
+        ui.big(arg.strip())         # one-off: draw whatever you typed
+        ui.blank()
+        return None
+    on = (want == "on") if want in ("on", "off") else not ui.BIG_MODE
+    ui.set_big(on)
+    engine.STATE["big"] = on
+    engine.persist_state()
+    if on:
+        ui.blank()
+        ui.big("big mode", "amber")
+        ui.blank()
+        ui.note("tool names and headings draw large from here on")
+    else:
+        ui.ok("big mode off")
+    name, keys, cfg = engine.terminal()
+    if on and keys:
+        ui.blank()
+        ui.note("to make the actual font bigger in " + name + ":")
+        ui.note("  " + keys)
+        if cfg:
+            ui.note("  " + cfg)
+    return None
+
+
+@command("edit", "open the tool in $EDITOR", group="shape", needs_tool=True)
+def h_edit(f, arg):
+    """Hand-editing is part of perfecting something. Frida picks the change up."""
+    import subprocess, tempfile
+    editor = (os.environ.get("VISUAL") or os.environ.get("EDITOR") or "").strip()
+    if not editor:
+        for candidate in ("nvim", "vim", "nano", "micro", "vi"):
+            if shutil.which(candidate):
+                editor = candidate
+                break
+    if not editor:
+        ui.err("no editor found — set $EDITOR")
+        return None
+    fd, path = tempfile.mkstemp(prefix=f.tool.name + "-", suffix=".py")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(f.tool.code)
+        before = f.tool.code
+        try:
+            subprocess.call(editor.split() + [path])
+        except OSError as exc:
+            ui.err("couldn't start %s: %s" % (editor, exc))
+            return None
+        with open(path, encoding="utf-8") as fh:
+            after = fh.read()
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    if after.strip() == before.strip():
+        ui.note("nothing changed")
+        return None
+    ok, why = engine.parses(after)
+    if not ok:
+        ui.err("that doesn't parse: " + why)
+        ui.note("nothing was changed — /edit again to fix it")
+        return None
+    f.tool.snapshot("edited by hand")
+    f.tool.code = after
+    f.tool.bump("patch")
+    # The model must be told, or its next full rewrite silently reverts you.
+    f.tool.messages.append({"role": "user", "content":
+                            "I edited the file by hand. This is the current file now."})
+    f.tool.messages.append({"role": "assistant", "content": engine.fenced(after)})
+    f.tool.last_run = None
+    f.tool.save()
+    ui.ok("picked up your edit · v%s · %d lines"
+          % (f.tool.ver, len(after.splitlines())))
+    ui.note("/test to check it still works")
+    return None
+
+
+@command("uninstall", "take the command off your PATH", group="ship",
+         arg="[name]", free_text=True)
+def h_uninstall(f, arg):
+    name = arg.strip() or f.tool.name
+    if not name or (not arg.strip() and not f.tool.code):
+        ui.err("which one? /tools lists them")
+        return None
+    res = ship.uninstall(name)
+    if res.get("ok"):
+        ui.ok("removed " + res["path"])
+        ui.note("the tool itself is still saved — /install puts it back")
+    else:
+        ui.err(res.get("error", "couldn't remove it"))
+    return None
+
+
 @command("model", "choose the model", group="session")
 def h_model(f, arg):
     from . import main as _main
@@ -668,13 +777,17 @@ def show_status(f):
         ui.out("  " + ui.c("faint", "describe one, or /tools to reopen an old one"))
         ui.blank()
         return
-    tests = t.last_run or {}
-    passed, total = tests.get("passed"), tests.get("total")
+    passed, total, good = ui.run_tally(t)
+    if ui.BIG_MODE:
+        ui.big(t.name, "teal")
+        ui.blank()
     rows = [
         ("name", t.name),
         ("version", "v" + t.ver),
         ("lines", str(_lines(t.code))),
-        ("tests", ("%s/%s passing" % (passed, total)) if total else "not run yet"),
+        ("tests", ("%d/%d passing" % (passed, total)) if total and good else
+                  ("%d of %d failing" % (total - passed, total)) if total else
+                  "not run yet"),
         ("versions", str(len(t.history) + 1)),
         ("deps", ", ".join(engine.detect_deps(t.code)["pip"]) or "standard library"),
     ]

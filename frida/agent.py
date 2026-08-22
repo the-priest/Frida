@@ -650,8 +650,13 @@ class Frida:
             ui.say(reply)
         if delivered and delivered.get("installed"):
             inst = delivered["installed"]
-            ui.sweep("  " + ui.c("lime", ui.G.done + " " + self.tool.name
-                                 + " is ready"), colour="lime")
+            if ui.BIG_MODE:
+                ui.blank()
+                ui.big(self.tool.name, "lime")
+                ui.blank()
+            else:
+                ui.sweep("  " + ui.c("lime", ui.G.done + " " + self.tool.name
+                                     + " is ready"), colour="lime")
             ui.file_card(inst["path"], f"{self.tool.name} is installed",
                          run_hint=f"{self.tool.name} --help")
             if not inst.get("on_path"):

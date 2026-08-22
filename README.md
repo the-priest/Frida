@@ -137,7 +137,10 @@ is a command, and commands do exactly one predictable thing:
 | `/deps` `/install` `/save` | dependencies, PATH, or a copy in `~/frida-tools` |
 | `/release` | a GitHub-ready repo — README, install.sh, LICENSE, push commands |
 | `/freeze` | a single-file binary via PyInstaller |
+| `/edit` | open the tool in `$EDITOR`; Frida picks the change up |
+| `/uninstall` | take the command back off your PATH |
 | `/resume` `/new` `/tools` `/rename` | sessions and history |
+| `/theme` `/big` | how it looks |
 | `/model` `/key` `/cost` `/doctor` | settings, spend, and this machine |
 
 The slash is optional at the main prompt: a bare word that names a command
@@ -148,8 +151,14 @@ When you want the word taken literally, lead with `>`:
 ```
 test                          → runs the tests
 test it with an empty file    → an instruction
+--help                        → runs your tool with --help
+--help should mention foo     → an instruction
 > test                        → the word "test", sent to Frida
 ```
+
+A line that is nothing but flags runs your tool with them, because typing
+`--help` at the prompt should show you the tool's help — not spend a minute
+and real money asking a model to change it.
 
 Commands work **everywhere** — at a question, at the plan, mid-flow. A question
 is a pause, not a cage: you can `/code` to look at what you have, `/save` it,
@@ -196,6 +205,32 @@ the request, and lets you hit `ctrl-c` at second four instead of second ninety.
 Motion is off automatically whenever output isn't a terminal, so piping and CI
 logs stay clean. `FORCE_COLOR=1` keeps the colours when you *do* want to pipe
 somewhere that understands them — `frida code | less -R`.
+
+### Frida cannot change your font — but it can draw big
+
+Font size belongs to the terminal, not to the program drawing inside it. Any
+CLI claiming to resize your font is lying to you. What Frida does instead:
+
+`frida doctor` names your terminal and tells you where its font setting lives —
+kitty, alacritty, foot, wezterm, konsole, gnome-terminal, xterm and VS Code are
+all recognised:
+
+```
+font too small? that's kitty, not Frida:
+  ctrl + shift + =   (ctrl+shift+- smaller, ctrl+shift+0 to reset)
+  ~/.config/kitty/kitty.conf: font_size 16
+```
+
+And `/big` draws tool names and headings three rows tall, in the same block
+idiom as the wordmark:
+
+```
+▄▀▄ █▀▄ █ █ █▀▀ █▄ █ ▀█▀ █ █ █▀▄ █▀▀
+█▀█ █ █ █ █ █▀▀ █ ▀█  █  █ █ █▀▄ █▀▀
+▀ ▀ ▀▀   ▀  ▀▀▀ ▀  ▀  ▀  ▀▀▀ ▀ ▀ ▀▀▀
+```
+
+It sticks between sessions, and `/big <anything>` draws one line on demand.
 
 ### Nothing you build is lost
 
