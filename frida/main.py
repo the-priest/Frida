@@ -58,8 +58,30 @@ HELP = """
 # ==========================================================================
 # KEYS
 # ==========================================================================
+def inherited_keys():
+    """Keys already sitting in theDawg's config, if it's installed on this box.
+
+    Frida is theDawg's descendant and uses the same providers. Making someone
+    paste a key they have already given to the same providers, on the same
+    machine, for the same purpose, is a pointless bit of ceremony.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    found = {}
+    legacy = (_Path(os.environ.get("XDG_CONFIG_HOME") or (_Path.home() / ".config"))
+              / "thedawg" / "config.json")
+    try:
+        data = _json.loads(legacy.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return found, None
+    for pid, key in (data.get("keys") or {}).items():
+        if pid in engine.PROVIDERS and (key or "").strip():
+            found[pid] = key.strip()
+    return found, (data.get("provider") if data.get("provider") in found else None)
+
+
 def ensure_key(interactive=True):
-    """Frida needs one provider key. Find it, or ask for it once."""
+    """Frida needs one provider key. Find it, inherit it, or ask for it once."""
     pid = engine.STATE["provider"]
     if (engine.STATE["keys"].get(pid) or "").strip():
         return True
@@ -69,6 +91,19 @@ def ensure_key(interactive=True):
             engine.persist_state()
             ui.info(f"using {engine.PROVIDERS[other]['label']} — it's the key you have")
             return True
+
+    legacy, preferred = inherited_keys()
+    if legacy:
+        labels = ", ".join(engine.PROVIDERS[p]["label"] for p in legacy)
+        if not interactive or ui.confirm(f"found a {labels} key in theDawg's config — use it?",
+                                         default=True):
+            engine.STATE["keys"].update(legacy)
+            engine.STATE["provider"] = preferred or next(iter(legacy))
+            engine.persist_state()
+            ui.ok(f"using your {engine.PROVIDERS[engine.STATE['provider']]['label']} key "
+                  f"(copied to {engine.CONFIG_PATH})")
+            return True
+
     if not interactive:
         ui.err("no API key. Set one: export "
                + engine.PROVIDERS[pid]["env"] + "=...")
@@ -124,9 +159,14 @@ def doctor(as_json=False):
     on_path = ship._on_path(ship.BIN_DIR)
     check("~/.local/bin on PATH", on_path, "" if on_path else ship.path_hint())
 
-    keyed = [engine.PROVIDERS[p]["label"] for p, k in engine.STATE["keys"].items() if (k or "").strip()]
+    keyed = [engine.PROVIDERS[p]["label"] for p, k in engine.STATE["keys"].items()
+             if (k or "").strip()]
+    # Not "required". Frida asks for a key the first time you run it and saves it,
+    # so a machine without one is not a broken machine — and saying so was a lie
+    # that made a working install look like a failed one.
     check("api key", bool(keyed), ", ".join(keyed) if keyed else
-          "set " + engine.PROVIDERS[engine.STATE["provider"]]["env"], required=True)
+          "not set — Frida will ask, or: export "
+          + engine.PROVIDERS[engine.STATE["provider"]]["env"] + "=sk-...")
 
     broken = [r for r in rows if r["required"] and not r["ok"]]
     if as_json:
@@ -142,6 +182,11 @@ def doctor(as_json=False):
     if broken:
         ui.err("Frida can't run until that's sorted.")
         return 1
+    if not keyed:
+        ui.warn("no API key yet — Frida will ask for one the first time you run it")
+        ui.note("or set it now:  export "
+                + engine.PROVIDERS[engine.STATE["provider"]]["env"] + "=sk-...")
+        ui.blank()
     if any(not r["ok"] for r in rows):
         ui.note("everything marked ! is optional — Frida runs without it, just less well")
     return 0

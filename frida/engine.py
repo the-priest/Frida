@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
