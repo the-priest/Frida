@@ -402,8 +402,33 @@ def _run_scenario(sandbox, case):
 # ==========================================================================
 # THE FULL PASS
 # ==========================================================================
+def _case_selftest(sb):
+    """A GUI tool must build its whole interface under `--self-test` and exit 0.
+
+    You cannot verify a windowed app by running it — it opens a window and
+    blocks forever, which to the harness is indistinguishable from a hang. So
+    GUI tools are required to accept `--self-test`: construct every widget,
+    wire every callback, then exit without entering the event loop. That
+    catches the failures that actually happen — a typo in a callback name, a
+    geometry manager conflict, a missing image — without a display.
+    """
+    run = _invoke(sb, ["--self-test"], timeout=HELP_TIMEOUT)
+    problems = []
+    err = (run["stderr"] or "")
+    if run["timed_out"]:
+        problems.append("`--self-test` never returned. It must build the interface "
+                        "and exit — it must not call mainloop().")
+    elif run["exit"] != 0:
+        last = err.strip().splitlines()[-1] if err.strip() else "no output"
+        problems.append("`--self-test` exited %s: %s" % (run["exit"], last))
+    elif _TRACEBACK.search(err):
+        problems.append("`--self-test` printed a traceback while building the interface.")
+    return {"name": "--self-test", "argv": ["--self-test"], "ok": not problems,
+            "run": run, "problems": problems}
+
+
 def verify(code, name="tool", cases=None, allow_danger=False, on_case=None,
-           deep=True):
+           deep=True, kind="cli"):
     """Run a generated tool for real and report what happened.
 
     Returns a dict:
@@ -439,6 +464,22 @@ def verify(code, name="tool", cases=None, allow_danger=False, on_case=None,
         if "--version" in code or "action=\"version\"" in code or "action='version'" in code:
             sb.reset_work()
             record(_case_version(sb))
+
+        if kind == "gui":
+            # No bare run: it would open a window and block until the timeout,
+            # and no pipe or interrupt checks either — a GUI tool's stdout is
+            # not where its output goes.
+            sb.reset_work()
+            record(_case_selftest(sb))
+            problems = []
+            for r in results:
+                problems.extend(r["problems"])
+            problems = list(dict.fromkeys(problems))
+            return {"ran": True, "ok": not problems, "blocked": None,
+                    "cases": results, "problems": problems,
+                    "report": render_report({"cases": results,
+                                             "problems": problems})}
+
         sb.reset_work()
         record(_case_bare(sb, requires_args))
 

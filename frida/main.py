@@ -139,6 +139,10 @@ def doctor(as_json=False):
           "managed venv ready" if engine._venv_python() else "built on first freeze")
     on_path = ship._on_path(ship.BIN_DIR)
     check("~/.local/bin on PATH", on_path, "" if on_path else ship.path_hint())
+    has_tk = engine.tk_available()
+    check("tkinter", has_tk,
+          "windowed tools work" if has_tk
+          else "no windowed tools — " + engine.tk_install_hint())
     term_name, term_keys, _term_cfg = engine.terminal()
     if term_name:
         check("terminal", True, term_name)
@@ -284,6 +288,18 @@ def show_cost():
     ui.blank()
 
 
+# What a non-zero exit usually means, so the number isn't the whole message.
+EXIT_MEANING = {
+    1: "  ·  the tool reported an error",
+    2: "  ·  bad usage — argparse exits 2 for that",
+    126: "  ·  found but not executable",
+    127: "  ·  command not found",
+    130: "  ·  you interrupted it",
+    137: "  ·  killed (out of memory, usually)",
+    139: "  ·  segfault",
+}
+
+
 def run_tool(f, argv):
     """Run the tool for real, attached to your terminal, and remember how it went.
 
@@ -318,7 +334,10 @@ def run_tool(f, argv):
         ui.err(str(exc))
         rc = 1
     ui.rule()
-    (ui.ok if rc == 0 else ui.warn)(f"exit {rc}")
+    if rc == 0:
+        ui.ok("exit 0")
+    else:
+        ui.warn("exit %d%s" % (rc, EXIT_MEANING.get(rc, "")))
 
     stderr = "".join(captured)
     if rc not in (0, 130):

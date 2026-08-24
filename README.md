@@ -180,6 +180,8 @@ is a command, and commands do exactly one predictable thing:
 | `/deps` `/install` `/save` | dependencies, PATH, or a copy in `~/frida-tools` |
 | `/release` | a GitHub-ready repo — README, install.sh, LICENSE, push commands |
 | `/freeze` | a single-file binary via PyInstaller |
+| `/ask <question>` | ask about the tool — it answers, nothing changes |
+| `/gui` `/cli` | a window, or a terminal tool |
 | `/edit` | open the tool in `$EDITOR`; Frida picks the change up |
 | `/uninstall` | take the command back off your PATH |
 | `/resume` `/new` `/tools` `/rename` | sessions and history |
@@ -336,6 +338,41 @@ it isn't working — rather than putting it on your PATH under the word "ready".
 And `/fix` works from a run you did yourself. `/run` tees stderr — echoing the
 traceback live while keeping it — so the crash you just watched is the thing
 `/fix` acts on, instead of "nothing to fix from, run /test first".
+
+### Ask it about the tool
+
+Plain language in the workshop means *change this*. There was no way to say
+*explain this* — asking "why does it hang on an empty file?" got you a patch
+for a bug that might not exist.
+
+```
+ask why does it hang on an empty file?
+why does line 88 catch OSError?
+/ask what happens if the config is missing?
+```
+
+It reads the file with line numbers and answers from the code in front of it —
+citing lines, and saying "the code doesn't do that" when the answer isn't
+there. It never edits, and the question stays out of the build conversation, so
+asking is free and doesn't confuse the next rewrite.
+
+### Windowed tools
+
+`/gui` builds a Tkinter app instead of a terminal tool — standard library, so
+it stays one file that runs anywhere Python does. Say "a desktop app" or "a gui
+tool" and Frida picks it up on its own; say "cli" or "terminal" anywhere and it
+won't.
+
+A window can't be verified by opening it — it would block forever, which to the
+harness is indistinguishable from a hang. So windowed tools must accept
+`--self-test`: build every widget, wire every callback, exit without entering
+the event loop. That catches what actually breaks — a typo in a callback, a
+geometry conflict, a missing asset — with no display involved. `--help` and
+`--version` still work from a terminal without opening anything.
+
+`tkinter` is not a pip package. Most distributions split it out, so
+`pip install tkinter` fails on a package that has never existed. `frida doctor`
+checks for it and names the real one for your distro.
 
 ### Nothing you build is lost
 

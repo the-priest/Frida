@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "2.6.0"
+__version__ = "2.7.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -558,6 +558,36 @@ DANGER = [
     r"diskpart",                                        # diskpart (interactive disk wiper)
     r"Remove-Item\s+.*-Recurse\s+.*-Force.*[Cc]:\\\\",  # PowerShell mass delete on C:\
     r"Format-Volume",                                    # PowerShell format
+
+    # --- the list form of a shell call ------------------------------------
+    # Every pattern above matches shell text. `subprocess.run(["rm", "-rf",
+    # os.path.expanduser("~")])` is the same command with the same effect and
+    # matched none of them, because there is no string "rm -rf" anywhere in it.
+    r"['\"]rm['\"]\s*,\s*['\"]-[rRfF]{1,2}",
+    r"['\"]-[rRfF]{1,2}['\"]\s*,\s*['\"]rm['\"]",
+    r"['\"]rmdir['\"]\s*,\s*['\"]/[sS]['\"]",
+
+    # --- wiping the user's home by any of its several spellings -----------
+    r"rmtree\(\s*Path\.home\(\)",
+    r"rmtree\(\s*(?:str\()?\s*os\.environ\[\s*['\"]HOME",
+    r"rmtree\(\s*(?:str\()?\s*Path\(\s*['\"]~",
+    r"rmtree\(\s*['\"]~",
+    r"rmtree\(\s*os\.path\.expandvars",
+    # deleting everything a recursive glob of home returns
+    r"(?:os\.remove|os\.unlink|Path\([^)]*\)\.unlink)[^\n]*\bglob\b[^\n]*(?:expanduser|Path\.home)",
+    r"\bglob\b[^\n]*(?:expanduser\(\s*['\"]~|Path\.home\(\))[^\n]*\*\*",
+
+    # --- fetching a script and running it ---------------------------------
+    # A generated tool that pipes a download into a shell is executing code
+    # nobody in this conversation has read, on the user's machine, as them.
+    r"(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b",
+    r"(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:zsh|python|perl)\b",
+
+    # --- permission and ownership catastrophes ----------------------------
+    # `/` here is the end of the argument, so it can be followed by whitespace,
+    # the end of the line, or the quote that closes the enclosing string.
+    r"chmod\s+(?:-[a-zA-Z]+\s+)*777\s+/(?:[\s'\"`)]|$)",
+    r"chown\s+-[rR][a-zA-Z]*\s+[^\n]*\s/(?:[\s'\"`)]|$)",
 ]
 
 # key persistence: per-provider keys in an owner-only config file
@@ -947,7 +977,7 @@ def _new_session_id():
     return time.strftime("s%Y%m%d-%H%M%S") + f"-{seq:03d}"
 
 def session_save(sid, name, code, messages, version="testing", args="",
-                 ver="1.0.0", named=False, title="", history=None):
+                 ver="1.0.0", named=False, title="", history=None, kind="cli"):
     """Auto-save the live conversation+code for a tool in progress (its full state)."""
     os.makedirs(SESSION_DIR, exist_ok=True)
     # A second-resolution id meant two tools started inside the same second got the
@@ -957,6 +987,7 @@ def session_save(sid, name, code, messages, version="testing", args="",
            "messages": messages or [], "version": version or "testing", "args": args or "",
            "deps": detect_deps(code or "")["pip"],
            "history": history or [], "lines": len((code or "").splitlines()),
+           "kind": kind or "cli",
            "ver": ver or "1.0.0", "named": bool(named), "title": title or (name or "untitled"),
            "updated": time.strftime("%Y-%m-%d %H:%M")}
     if not write_json_atomic(os.path.join(SESSION_DIR, _safe_id(sid) + ".json"), rec):
@@ -3795,6 +3826,41 @@ PIP_ALIASES = {
     "discord": "discord.py", "dotenv": "python-dotenv", "slugify": "python-slugify",
     "ruamel": "ruamel.yaml", "pytz": "pytz", "tqdm": "tqdm",
 }
+
+
+def tk_available(python=None):
+    """Is tkinter importable by the interpreter that will run generated tools?"""
+    try:
+        out = subprocess.run([python or run_python(), "-c",
+                              "import importlib.util,sys;"
+                              "sys.exit(0 if importlib.util.find_spec('tkinter') else 1)"],
+                             capture_output=True, timeout=20)
+        return out.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def tk_install_hint():
+    """How to get tkinter on this machine. It is never a pip package.
+
+    Tkinter ships with CPython but most distributions split it into a separate
+    system package, so `pip install tkinter` — which is what everyone tries —
+    fails with a confusing error about a package that has never existed.
+    """
+    fam = (DISTRO or {}).get("family", "")
+    if fam == "arch":
+        return "sudo pacman -S --needed tk"
+    if fam == "debian":
+        return "sudo apt install -y python3-tk"
+    if fam == "fedora":
+        return "sudo dnf install -y python3-tkinter"
+    if fam == "suse":
+        return "sudo zypper install -y python3-tk"
+    if IS_MAC:
+        return "brew install python-tk"
+    if IS_WIN:
+        return "re-run the Python installer and tick 'tcl/tk and IDLE'"
+    return "install your distribution's python3-tk package"
 
 
 def missing_deps(code):

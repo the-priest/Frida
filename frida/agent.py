@@ -54,6 +54,26 @@ STEP_SHIP = "Hand it over"
 _FENCE = re.compile(r"^[ \t]*```[^\n]*\n", re.M)
 
 
+_GUI_WORDS = re.compile(
+    r"\b(gui|window|windowed|desktop app|desktop application|tkinter|tk app|"
+    r"graphical|point.and.click|with buttons|dialog box|a form|"
+    r"drag.and.drop|system tray)\b", re.I)
+_CLI_WORDS = re.compile(r"\b(cli|command.line|terminal|tui|curses|headless|"
+                        r"pipe(?:able|d)?|stdin|stdout)\b", re.I)
+
+
+def wants_gui(request):
+    """Did they ask for a window?
+
+    Deliberately conservative: an explicit CLI word anywhere wins, because
+    "a terminal tool with a nice interface" is not a request for Tkinter.
+    """
+    text = request or ""
+    if _CLI_WORDS.search(text):
+        return False
+    return bool(_GUI_WORDS.search(text))
+
+
 def _previewer(board):
     """Show what the model is doing, whatever it happens to be doing.
 
@@ -137,6 +157,7 @@ class Tool:
         # number against the OLD code, so /versions showed two v1.0.0 entries and
         # told you nothing. The bump is now applied after the snapshot, by write().
         self.pending_bump = None
+        self.kind = "cli"          # or "gui" — a window instead of a terminal
 
     # ---- history --------------------------------------------------------
     def snapshot(self, note=""):
@@ -242,7 +263,8 @@ class Tool:
     def save(self):
         self.sid = engine.session_save(self.sid, self.name, self.code, self.messages,
                                        self.version, self.args, self.ver, self.named,
-                                       self.title, self.history).get("id", self.sid)
+                                       self.title, self.history,
+                                       self.kind).get("id", self.sid)
         return self.sid
 
     @classmethod
@@ -258,6 +280,7 @@ class Tool:
         t.ver = record.get("ver") or "1.0.0"
         t.args = record.get("args") or ""
         t.history = record.get("history") or []
+        t.kind = record.get("kind") or "cli"
         return t
 
 
@@ -463,8 +486,14 @@ class Frida:
                      + ("  ·  patched" if res.get("edit_mode") else ""))
         return {"reply": reply, "code": code, "res": res}, None
 
+    def system_prompt(self):
+        """The base rules, plus the windowed-tool rules when there is a window."""
+        if getattr(self.tool, "kind", "cli") == "gui":
+            return P["system"] + "\n\n" + P["gui"]
+        return P["system"]
+
     def _full_write(self, instruction, board):
-        convo = ([{"role": "system", "content": P["system"]}]
+        convo = ([{"role": "system", "content": self.system_prompt()}]
                  + self.tool.prompt_view()
                  + [{"role": "user", "content": instruction}])
         return self._call(convo, board=board, tier="build",
@@ -493,6 +522,17 @@ class Frida:
         where it died with ModuleNotFoundError the first time you typed its
         name. /deps existed, but you had to already know that.
         """
+        # A windowed tool needs tkinter, which is not a pip package — most
+        # distributions split it out, so `pip install tkinter` fails with a
+        # confusing error about something that has never existed on PyPI.
+        if getattr(self.tool, "kind", "cli") == "gui" and not engine.tk_available():
+            board.fail(STEP_DEPS, "tkinter isn't installed")
+            board.close()
+            ui.warn("this tool needs tkinter, and Python here doesn't have it")
+            ui.note(engine.tk_install_hint())
+            ui.note("it is not a pip package — that install will not work")
+            board.show()
+            return False
         try:
             missing = engine.missing_deps(self.tool.code)
         except Exception:
@@ -545,7 +585,8 @@ class Frida:
 
         board.set_stage("running it", f"0/{total}")
         result = harness.verify(self.tool.code, name=self.tool.name, cases=cases,
-                                allow_danger=allow_danger, on_case=on_case)
+                                allow_danger=allow_danger, on_case=on_case,
+                                kind=getattr(self.tool, "kind", "cli"))
         self.tool.last_run = result
 
         if result.get("blocked"):
@@ -677,6 +718,8 @@ class Frida:
     def build(self, request, install=True, ask=True, verify=True):
         """Take a sentence, hand back a working command. Returns the Tool."""
         self._attempt = 0
+        if wants_gui(request):
+            self.tool.kind = "gui"
         write_step = "Write it"
         board = ui.TaskBoard("", [STEP_AGREE, STEP_PLAN, write_step, STEP_DEPS,
                                   STEP_READ, STEP_RUN, STEP_FIX, STEP_SHIP])
@@ -852,6 +895,40 @@ class Frida:
             self.busy = False
             self.tool.pending_bump = None
             board.close()
+
+    def ask(self, question):
+        """Answer a question about the tool, without changing it.
+
+        Deliberately its own path rather than an instruction. Plain language in
+        the workshop means "change this", and there was no way to say "explain
+        this" — asking "why does it hang on an empty file?" got you a patch for
+        a bug that may not exist. This reads; it never writes.
+        """
+        numbered = "\n".join("%4d  %s" % (i, line) for i, line
+                              in enumerate(self.tool.code.splitlines(), 1))
+        board = ui.TaskBoard("", ["Read it and answer"])
+        board.show()
+        try:
+            res = self._call(
+                [{"role": "system", "content": P["ask"]},
+                 {"role": "user", "content":
+                  "The tool is `%s`. Here is the complete source, with line "
+                  "numbers.\n\n%s\n\nQuestion: %s"
+                  % (self.tool.name, numbered, question)}],
+                board=board, tier="cheap", stage="reading it")
+            board.finish(0, "answered")
+        finally:
+            board.close()
+        if res.get("error"):
+            ui.err(res["error"])
+            return
+        answer = _prose(res.get("reply", "")) or res.get("reply", "")
+        ui.say(answer.strip() or "I couldn't answer that from the code.")
+        # The question and answer stay OUT of self.tool.messages on purpose:
+        # the build conversation is a record of what the tool should be, and
+        # filling it with Q&A would both confuse the next rewrite and undo the
+        # token saving that makes long sessions affordable.
+        self.cost_line()
 
     def review(self):
         board = ui.TaskBoard("", ["Read it properly"])

@@ -38,10 +38,11 @@ from . import engine, ship, ui
 # ==========================================================================
 class Command:
     __slots__ = ("name", "aliases", "arg", "blurb", "group", "handler",
-                 "needs_tool", "free_text", "hidden")
+                 "needs_tool", "free_text", "hidden", "keep_head")
 
     def __init__(self, name, blurb, handler, group="", aliases=(), arg="",
-                 needs_tool=False, free_text=False, hidden=False):
+                 needs_tool=False, free_text=False, hidden=False,
+                 keep_head=()):
         self.name = name
         self.aliases = tuple(aliases)
         self.arg = arg
@@ -51,6 +52,11 @@ class Command:
         self.needs_tool = needs_tool
         self.free_text = free_text
         self.hidden = hidden
+        # Aliases that are ordinary English words and part of the sentence they
+        # introduce. "why does it hang" must reach the handler whole — reading
+        # it as the command `why` plus the question "does it hang" inverts what
+        # was asked.
+        self.keep_head = tuple(keep_head)
 
     @property
     def names(self):
@@ -66,11 +72,11 @@ _BY_NAME = {}
 
 
 def command(name, blurb, group="", aliases=(), arg="", needs_tool=False,
-            free_text=False, hidden=False):
+            free_text=False, hidden=False, keep_head=()):
     """Register a command. The decorated function is its handler."""
     def deco(fn):
         cmd = Command(name, blurb, fn, group, aliases, arg, needs_tool,
-                      free_text, hidden)
+                      free_text, hidden, keep_head)
         REGISTRY.append(cmd)
         for n in cmd.names:
             _BY_NAME[n] = cmd
@@ -127,6 +133,9 @@ def resolve(line):
         return RUN, lookup("run"), body
 
     cmd = lookup(head)
+
+    if cmd and head.lower() in cmd.keep_head and tail:
+        tail = body                    # the head word is part of the sentence
 
     if slashed:
         if not cmd:
@@ -437,6 +446,32 @@ def h_revert(f, arg):
     return None
 
 
+@command("gui", "build this one as a window, not a terminal tool",
+         group="shape", aliases=("window",))
+def h_gui(f, arg):
+    return _set_kind(f, "gui")
+
+
+@command("cli", "back to a terminal tool", group="shape", aliases=("terminal",))
+def h_cli(f, arg):
+    return _set_kind(f, "cli")
+
+
+def _set_kind(f, want):
+    was = getattr(f.tool, "kind", "cli")
+    f.tool.kind = want
+    if f.tool.code:
+        f.tool.save()
+    if was == want:
+        ui.note("already a %s tool" % ("windowed" if want == "gui" else "terminal"))
+        return None
+    ui.ok("this is a windowed tool now" if want == "gui"
+          else "this is a terminal tool now")
+    if f.tool.code:
+        ui.note("say what it should look like, and it'll be rebuilt that way")
+    return None
+
+
 @command("rename", "give the tool a different name", group="shape",
          arg="<name>", needs_tool=True, free_text=True)
 def h_rename(f, arg):
@@ -464,6 +499,20 @@ def h_rename(f, arg):
 
 
 # ---- look at it ----------------------------------------------------------
+@command("ask", "ask a question about the tool — it answers, nothing changes",
+         group="look", arg="<question>", aliases=("quest", "explain", "why"),
+         free_text=True, needs_tool=True, keep_head=("why", "explain"))
+def h_ask(f, arg):
+    question = arg.strip()
+    if not question:
+        ui.err("ask something")
+        ui.note("ask why does it hang on an empty file?")
+        ui.note("ask what happens if the config is missing?")
+        return None
+    f.ask(question)
+    return None
+
+
 @command("code", "print the source", group="look", needs_tool=True)
 def h_code(f, arg):
     ui.code(f.tool.code, title=f.tool.name + ".py")

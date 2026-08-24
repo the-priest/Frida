@@ -226,6 +226,71 @@ Rules:
 # ==========================================================================
 # REVIEW
 # ==========================================================================
+GUI_PROMPT = """
+=== THIS TOOL HAS A WINDOW ===
+
+Build a desktop application with Tkinter, from the standard library. Not a web
+page, not PyQt, not a terminal UI. Tkinter ships with Python, so the tool stays
+a single file that runs anywhere Python does — which is the whole point.
+
+It is still one self-contained .py file with a shebang, a module docstring,
+`main()`, and `if __name__ == "__main__": sys.exit(main())`.
+
+Requirements specific to a windowed tool:
+
+  * `--help` must still work, from a terminal, without opening a window, and
+    exit 0. Parse arguments BEFORE creating the root window.
+  * `--version` must work the same way.
+  * `--self-test` is REQUIRED. It must construct the complete interface —
+    every widget, every binding, every menu — and then exit 0 WITHOUT calling
+    mainloop(). This is how the tool gets verified, because a window cannot be
+    verified by opening it. Structure the code so this is honest:
+
+        def build_ui(root): ...      # creates everything, wires everything
+        def main():
+            args = parse_args()
+            root = tk.Tk()
+            build_ui(root)
+            if args.self_test:
+                root.destroy()
+                return 0
+            root.mainloop()
+            return 0
+
+  * Handle a missing display gracefully. `tk.Tk()` raises `tk.TclError` when
+    there is no display; catch it and print a clear message to stderr with a
+    non-zero exit rather than a traceback.
+  * Set a sensible window title, a minimum size, and let the layout resize —
+    use grid/pack weights, never fixed pixel positions.
+  * Keyboard matters: bind Escape to close, Return to the primary action, and
+    give the main control focus on start.
+  * Never block the event loop. Anything slow goes on a `threading.Thread` and
+    reports back with `root.after`, so the window never freezes.
+  * No emoji in the UI text. Tk's font handling for them is unreliable across
+    platforms.
+"""
+
+
+ASK_PROMPT = """You are answering a question about a specific command-line tool.
+The complete source is given to you. Answer from the code in front of you, not
+from how tools like this usually work.
+
+Rules:
+  - Answer the question that was asked. Do not review the code, do not suggest
+    improvements, and do not rewrite anything unless asked to.
+  - Cite line numbers when you point at something: "line 42 opens the file".
+  - If the answer is not in the code, say so plainly. Do not guess at behaviour
+    the source does not show — say "the code doesn't do that" or "I can't tell
+    from this file".
+  - If the question assumes something false about the tool, correct it first.
+  - Be brief. Two or three sentences for a simple question. Prose, not bullets,
+    unless a list is genuinely the answer.
+  - No code blocks unless quoting a few lines that answer the question.
+
+You are not writing the tool right now. You are explaining it.
+"""
+
+
 REVIEW_PROMPT = """You are a senior Python engineer reviewing a single-file COMMAND-LINE tool,
 built to run on __DISTRO_PRETTY__ (`__PKG_MGR__`). Be specific and be useful. No praise, no
 summary of what the code obviously does.
@@ -296,6 +361,8 @@ def build(distro):
                  .replace("__PKG_MGR__", pkgmgr))
 
     return {
+        "ask": sub(ASK_PROMPT),
+        "gui": sub(GUI_PROMPT),
         "system": sub(SYSTEM_PROMPT_TMPL),
         "plan": sub(PLAN_PROMPT),
         "intake": sub(INTAKE_PROMPT),

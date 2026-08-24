@@ -1183,6 +1183,8 @@ def hud(tool=None, model="", cost="", session_versions=0):
     if tool is not None and tool.code:
         lines_n = len(tool.code.splitlines())
         left.append(c("teal", tool.name, bold=True))
+        if getattr(tool, "kind", "cli") == "gui":
+            left.append(c("violet", "window"))
         left.append(c("faint", "v" + tool.ver))
         left.append(c("grey", "%d ln" % lines_n))
         passed, total, good = run_tally(tool)
