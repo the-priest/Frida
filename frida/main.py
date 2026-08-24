@@ -219,8 +219,8 @@ def show_tools(as_json=False):
 AUTO_LABEL = "let Frida choose"
 
 
-def pick_model(f=None):
-    """Choose a model, or hand the choice back to Frida.
+def pick_model(f=None, arg=""):
+    """Choose a model from the provider's LIVE list.
 
     fetch_models returns {"models", "source", "error"} — this read it as a bare
     list and sliced it, so /model raised `TypeError: unhashable type: 'slice'`
@@ -228,39 +228,85 @@ def pick_model(f=None):
     """
     pid = engine.STATE["provider"]
     label = engine.PROVIDERS[pid]["label"]
-    got = engine.fetch_models(pid, force=True)
+    arg = (arg or "").strip()
+
+    with ui.Spin("asking %s what it has" % label):
+        got = engine.fetch_models(pid, force=True)
     models = list(got.get("models") or [])
     if not models:
         ui.err("couldn't list %s's models: %s" % (label, got.get("error") or "no answer"))
         return
-    if got.get("source") != "live":
-        ui.note("showing the built-in list — " + (got.get("error") or "couldn't reach the provider"))
 
+    live = got.get("source") == "live"
     current = engine.STATE["models"].get(pid)
     best = engine.preferred_model(pid, models)
 
+    # `/model qwen` — set it outright when the name is unambiguous, filter when
+    # it isn't. Typing the name you already know beats scrolling a list for it,
+    # and the argument used to be thrown away entirely.
+    shown = models
+    if arg:
+        exact = [m for m in models if m.lower() == arg.lower()]
+        if exact:
+            engine.STATE["models"][pid] = exact[0]
+            engine.persist_state()
+            ui.ok("pinned " + exact[0])
+            return
+        hits = [m for m in models if arg.lower() in m.lower()]
+        if len(hits) == 1:
+            engine.STATE["models"][pid] = hits[0]
+            engine.persist_state()
+            ui.ok("pinned " + hits[0])
+            return
+        if not hits:
+            ui.err("no %s model matches %r" % (label, arg))
+            ui.note("/model on its own lists them all")
+            return
+        shown = hits
+
+    ui.blank()
+    ui.out("  " + ui.badge(label, "teal") + "  " +
+           (ui.badge("live", "lime") if live else ui.badge("cached", "amber")) +
+           ui.c("faint", "   %d models" % len(models)) +
+           (ui.c("faint", "  ·  matching %r: %d" % (arg, len(shown))) if arg else ""))
+    if not live:
+        ui.note(got.get("error") or "couldn't reach the provider — showing the built-in list")
+
+    cap = 20
     options = [{"label": AUTO_LABEL,
                 "detail": ("currently " + best) if best else "pick the best available"}]
-    for m in models[:14]:
+    for m in shown[:cap]:
         marks = []
         if m == current:
             marks.append("pinned")
         if m == best:
-            marks.append("what Frida would pick")
+            marks.append("Frida's pick")
         options.append({"label": m, "detail": " · ".join(marks)})
+    if len(shown) > cap:
+        options.append({"label": "…the other %d" % (len(shown) - cap),
+                        "detail": "type any part of a name instead"})
 
     choice = ui.ask("which %s model?" % label, options, allow_other=True,
-                    default=1 if not current else
-                    next((i for i, o in enumerate(options, 1)
-                          if o["label"] == current), 1))
+                    why="type a number, or part of a name to filter",
+                    default=next((i for i, o in enumerate(options, 1)
+                                  if o["label"] == current), 1))
     if choice is ui.CANCELLED or not str(choice).strip():
         ui.note("left on " + (current or "automatic"))
         return
+    if str(choice).startswith("…the other"):
+        return pick_model(f, "")
     if choice == AUTO_LABEL:
         engine.STATE["models"].pop(pid, None)
         engine.persist_state()
         ui.ok("automatic — Frida will use " + (best or "the best model available"))
         return
+    if choice not in models:
+        # they typed free text: treat it as a filter and go round again
+        hits = [m for m in models if str(choice).lower() in m.lower()]
+        if hits and len(hits) < len(models):
+            return pick_model(f, str(choice))
+        if not hits:
+            ui.warn("%s doesn't list %r — pinning it anyway" % (label, choice))
     engine.STATE["models"][pid] = choice
     engine.persist_state()
     ui.ok("pinned " + choice)

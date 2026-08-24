@@ -791,10 +791,11 @@ def h_think(f, arg):
     return None
 
 
-@command("model", "choose the model", group="session")
+@command("model", "choose the model — live list from the provider",
+         group="session", arg="[name or part of one]")
 def h_model(f, arg):
     from . import main as _main
-    _main.pick_model(f)
+    _main.pick_model(f, arg)
     return None
 
 

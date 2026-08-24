@@ -218,6 +218,38 @@ def c(name, text, bold=False):
 _ANSI_RE = re.compile(r"\033\[[0-9;]*[A-Za-z]")
 
 
+def bg(name, text, fg="white", bold=False):
+    """Text on a filled background. The one effect a terminal has that reads as
+    a surface rather than a line — used sparingly, for badges only."""
+    if not DEPTH:
+        return text
+    if DEPTH == 24:
+        r, g, b = _RGB.get(name, _RGB["amber"])
+        fr, fg_, fb = _RGB.get(fg, _RGB["white"])
+        code = f"\033[48;2;{r};{g};{b}m\033[38;2;{fr};{fg_};{fb}m"
+    elif DEPTH == 8:
+        code = f"\033[48;5;{_256.get(name, 214)}m\033[38;5;{_256.get(fg, 255)}m"
+    else:
+        code = "\033[7m"
+    return f"{BOLD if bold else ''}{code}{text}{RESET}"
+
+
+def badge(text, colour="amber", fg="white"):
+    """A filled pill. Half-block caps make it read as rounded rather than as a
+    rectangle of inverted text."""
+    if not DEPTH:
+        return "[" + text + "]"
+    if not UNICODE or DEPTH < 8:
+        return bg(colour, " " + text + " ", fg)
+    return (c(colour, "\u258c") + bg(colour, text, fg, bold=True) +
+            c(colour, "\u2590"))
+
+
+def badge_len(text):
+    """Columns a badge() of `text` occupies — for aligning a row that has one."""
+    return len(text) + 2
+
+
 def plain(text):
     return _ANSI_RE.sub("", text)
 
@@ -526,6 +558,46 @@ class Live:
 
     def __exit__(self, *_):
         self.stop()
+
+
+class Spin:
+    """A spinner for a blocking call that isn't a whole build.
+
+    fetch_models can sit on a cold connection for twenty seconds. Without this
+    the terminal simply stopped, which is indistinguishable from a hang.
+    """
+
+    def __init__(self, label=""):
+        self.label = label
+        self._stop = threading.Event()
+        self._thread = None
+        self._t0 = time.time()
+
+    def __enter__(self):
+        if is_tty() and DEPTH:
+            hide_cursor()
+            self._thread = threading.Thread(target=self._spin, daemon=True)
+            self._thread.start()
+        elif self.label:
+            dim(self.label)
+        return self
+
+    def _spin(self):
+        i = 0
+        while not self._stop.wait(0.09):
+            frame = SPINNER[i % len(SPINNER)]
+            secs = time.time() - self._t0
+            raw("\r\033[2K" + MARGIN + c("amber", frame) + " " +
+                c("grey", self.label) + c("faint", "  %.0fs" % secs))
+            i += 1
+
+    def __exit__(self, *_):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=0.3)
+            raw("\r\033[2K")
+            show_cursor()
+        return False
 
 
 def hide_cursor():
@@ -916,6 +988,31 @@ def _intercept(answer):
     return True
 
 
+def _option_rows(opts, default=0):
+    """One aligned row per option, hung off a rail.
+
+    Two stacked lines per option — label, then an indented detail — cost twice
+    the height and left the details in a ragged left-hand column of their own.
+    One row, two columns, a rail down the side: the same information at half
+    the height, with something for the eye to run down.
+    """
+    room = width() - 12
+    label_w = min(max((vlen(o["label"]) for o in opts), default=0), max(18, room // 2))
+    for i, o in enumerate(opts, 1):
+        label = o["label"]
+        if vlen(label) > label_w:
+            label = clip(label, label_w - 1) + "…"
+        num = c("amber", str(i).rjust(3), bold=True)
+        rail = c("teal", "\u2503") if i == default and UNICODE else c("faint", G.v)
+        cell = (c("cream", label, bold=True) if i == default else c("cream", label))
+        cell += " " * max(0, label_w - vlen(label))
+        row = "  " + num + "  " + rail + "  " + cell
+        detail = o.get("detail") or ""
+        if detail:
+            row += "  " + c("faint", clip(detail, max(8, room - label_w)))
+        out(row.rstrip())
+
+
 def ask(question, options, why="", allow_other=True, default=1):
     """Render a multiple-choice question and read the answer.
 
@@ -929,14 +1026,9 @@ def ask(question, options, why="", allow_other=True, default=1):
     if why:
         out("  " + c("faint", why))
     blank()
-    for i, o in enumerate(opts, 1):
-        num = c("amber", f"{i}", bold=True)
-        line = f"    {num}  {c('cream', o['label'])}"
-        out(line)
-        if o.get("detail"):
-            out("       " + c("faint", o["detail"]))
+    _option_rows(opts, default)
     if allow_other:
-        out(f"    {c('faint', 'or type your own answer')}")
+        out("      " + c("faint", G.v) + "  " + c("faint", "or type your own answer"))
     blank()
     line = c("amber", "  " + G.arrow + " ") + c("faint", f"[{default}] ")
     while True:
@@ -949,9 +1041,7 @@ def ask(question, options, why="", allow_other=True, default=1):
         if _intercept(answer):
             blank()
             out("  " + c("cream", question, bold=True))
-            for i, o in enumerate(opts, 1):
-                out("    %s  %s" % (c("amber", str(i), bold=True),
-                                    c("cream", o["label"])))
+            _option_rows(opts, default)
             blank()
             continue
         if not answer:
@@ -1159,14 +1249,15 @@ def file_card(path, label="written", run_hint="", extra=None):
     except OSError:
         size = 0
     human = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
+    rail = c("faint", G.v)
     blank()
-    out("  " + c("lime", G.done) + " " + c("cream", label, bold=True) +
-        c("faint", f"  {human}"))
-    out("    " + c("teal", str(path)))
+    out("  " + c("lime", G.done) + "  " + c("cream", label, bold=True) +
+        c("faint", "   " + human))
+    out("  " + rail + "  " + c("teal", str(path)))
     if run_hint:
-        out("    " + c("faint", "run it: ") + c("gold", run_hint))
+        out("  " + rail + "  " + c("faint", "run it  ") + c("gold", run_hint))
     for line in (extra or []):
-        out("    " + c("faint", line))
+        out("  " + rail + "  " + c("faint", line))
     blank()
 
 
@@ -1249,10 +1340,11 @@ def hud(tool=None, model="", cost="", session_versions=0):
         left.append(c("grey", "%d ln" % lines_n))
         passed, total, good = run_tally(tool)
         if total:
-            left.append(c("lime", "%d/%d %s" % (passed, total, G.done)) if good
-                        else c("red", "%d/%d %s" % (passed, total, G.fail)))
+            left.append(badge("%d/%d %s" % (passed, total, G.done), "lime")
+                        if good else
+                        badge("%d/%d %s" % (passed, total, G.fail), "red"))
         elif (tool.last_run or {}).get("blocked"):
-            left.append(c("amber", "not run"))
+            left.append(badge("not run", "amber"))
         else:
             left.append(c("faint", "untested"))
         if session_versions > 1:

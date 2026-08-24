@@ -931,6 +931,48 @@ check("/fix checks for real problems before drawing a board",
       _fix_src.index("problems_for_model") < _fix_src.index("TaskBoard"))
 check("...and says so when there are none", "nothing to fix" in _fix_src)
 
+# ==========================================================================
+# 2.7.2 — /model and the look
+# ==========================================================================
+_pm = _ins.getsource(main.pick_model)
+check("/model fetches the LIVE list", "force=True" in _pm)
+check("...behind a spinner, since it can block for 20s", "ui.Spin" in _pm)
+check("...and says whether the list was live or cached", '"live"' in _pm and "cached" in _pm)
+check("/model takes an argument", "arg" in _ins.signature(main.pick_model).parameters)
+check("...and the command actually passes it",
+      "pick_model(f, arg)" in _ins.getsource(commands.h_model))
+check("...which is advertised in the usage", "name" in commands.lookup("model").usage)
+
+# badges must survive every colour depth, including none
+_depth = ui.DEPTH
+try:
+    for d in (24, 8, 4, 0):
+        ui.DEPTH = d
+        b = ui.badge("live", "lime")
+        check("badge is non-empty at depth %d" % d, "live" in ui.plain(b), repr(b))
+        check("badge carries no stray newline at depth %d" % d, "\n" not in b)
+    ui.DEPTH = 0
+    check("badge degrades to brackets with no colour", ui.badge("live") == "[live]")
+finally:
+    ui.DEPTH = _depth
+
+# the option list is one row per option, not two
+_rows = []
+_real_out = ui.out
+ui.out = _rows.append
+try:
+    ui._option_rows([{"label": "a", "detail": "one"},
+                     {"label": "b", "detail": "two"},
+                     {"label": "c", "detail": ""}], default=2)
+finally:
+    ui.out = _real_out
+check("one row per option", len(_rows) == 3, _rows)
+check("the detail sits on the same row", "one" in ui.plain(_rows[0]))
+check("the default row is marked", ui.plain(_rows[1])[:6] != ui.plain(_rows[0])[:6]
+      or "\u2503" in _rows[1])
+check("long labels are clipped, not wrapped",
+      all("\n" not in r for r in _rows))
+
 print()
 if FAILURES:
     print(f"something failed: {len(FAILURES)}")
