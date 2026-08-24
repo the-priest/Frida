@@ -647,17 +647,36 @@ check("only the previewer writes the detail line while it is attached",
 print()
 print("== the checklist must not tick work it did not finish ==")
 
+# Abandoned mid-build: the step must NOT get a green tick.
 _b = ui.TaskBoard("", ["Plan", "Write it", "Read"])
 _b.show()
 _b.finish("Plan", "done")
 _b.start("Write it", "writing")
-_b.close()
+try:
+    raise KeyboardInterrupt
+except KeyboardInterrupt:
+    _b.close()                       # closed while an exception is unwinding
 _states = {t["text"]: t["status"] for t in _b.tasks}
 check("an interrupted step is not marked done",
       _states["Write it"] != _b.DONE, _states["Write it"])
 check("...it says it stopped",
       _b.tasks[1]["note"] == "stopped", _b.tasks[1]["note"])
 check("a genuinely finished step is still done", _states["Plan"] == _b.DONE)
+
+# ...but Frida also closes the board every time it pauses to ask a question,
+# and that used to print "Agree on the shape · stopped" right before asking.
+_p = ui.TaskBoard("", ["Agree on the shape", "Plan"])
+_p.show()
+_p.start("Agree on the shape", "working out what to ask")
+_p.close()                           # an ordinary pause, no exception
+check("pausing to ask a question does not say 'stopped'",
+      _p.tasks[0]["note"] != "stopped", _p.tasks[0]["note"])
+check("...and the step is left finished, not skipped",
+      _p.tasks[0]["status"] == _p.DONE, _p.tasks[0]["status"])
+check("an explicit close(interrupted=True) still marks it stopped",
+      (lambda b: (b.show(), b.start("Plan", "x"), b.close(interrupted=True),
+                  b.tasks[1]["note"])[-1])(ui.TaskBoard("", ["a", "Plan"]))
+      == "stopped")
 
 # set_stage ran on every previewer tick and restarted the clock each time, so
 # the elapsed counter was pinned at 0s — the one number proving it's alive.
@@ -690,6 +709,88 @@ for arg, want in [("off", 0), ("2000", 2000), ("auto", None)]:
     check(f"/think {arg} sets the budget", engine.STATE.get("thinking") == want,
           repr(engine.STATE.get("thinking")))
 engine.STATE["thinking"] = None
+
+print()
+print("== a tool's dependencies must be installed before it is judged ==")
+
+# Nothing installed them. A tool importing any third-party package failed static
+# analysis, failed the real run, burned every fix round on an error no edit could
+# repair, and was installed on PATH anyway — dying with ModuleNotFoundError the
+# first time it was typed.
+check("`import vlc` maps to the right pip package",
+      engine.detect_deps("import vlc")["pip"] == ["python-vlc"],
+      str(engine.detect_deps("import vlc")["pip"]))
+check("curses is not treated as a pip package",
+      engine.detect_deps("import curses")["pip"] == [])
+for mod, pkg in [("PIL", "Pillow"), ("cv2", "opencv-python"),
+                 ("dotenv", "python-dotenv"), ("sklearn", "scikit-learn"),
+                 ("psycopg2", "psycopg2-binary"), ("Xlib", "python-xlib")]:
+    check(f"`import {mod}` maps to {pkg}",
+          engine.detect_deps("import " + mod)["pip"] == [pkg],
+          str(engine.detect_deps("import " + mod)["pip"]))
+
+check("a stdlib-only tool needs nothing installed",
+      engine.missing_deps("import os, sys, json") == [])
+check("missing_deps names what is genuinely absent",
+      "python-vlc" in engine.missing_deps("import vlc"))
+check("missing_deps ignores packages that ARE importable",
+      "json" not in str(engine.missing_deps("import json, vlc")))
+
+check("the build has a step for it", hasattr(agent.Frida, "bring_deps"))
+check("the step is on the build checklist",
+      agent.STEP_DEPS and isinstance(agent.STEP_DEPS, str))
+
+
+class _DepBoard(ui.TaskBoard):
+    pass
+
+
+_db = _DepBoard("", [agent.STEP_DEPS])
+_f = agent.Frida.__new__(agent.Frida)
+_f.tool = agent.Tool()
+_f.tool.code = "import os, sys\nprint(1)"
+check("a stdlib-only build skips the install step",
+      agent.Frida.bring_deps(_f, _db) is True
+      and _db.tasks[0]["status"] == _db.SKIPPED,
+      _db.tasks[0]["status"])
+
+print()
+print("== it must not call broken code 'ready' ==")
+
+# It installed regardless of whether the checks passed, and announced "ready".
+import inspect as _ins                                   # noqa: E402
+_src = _ins.getsource(agent.Frida.build)
+check("install is conditional on the tool being healthy",
+      "do_install=install and healthy" in _src, "still installs unconditionally")
+check("the failure is marked on the handover",
+      'delivered["unhealthy"] = True' in _src)
+_close_src = _ins.getsource(agent.Frida._closing)
+check("a broken build says so instead of 'is ready'",
+      "still isn't working" in _close_src)
+check("...and still hands you the saved file",
+      "saved" in _close_src)
+
+print()
+print("== /fix must work from a run you did yourself ==")
+
+# run_tool showed a traceback and recorded nothing, so /fix answered "nothing to
+# fix from — run /test first" immediately after printing the crash.
+_run_src = _ins.getsource(main.run_tool)
+check("run_tool captures stderr", "stderr=subprocess.PIPE" in _run_src)
+check("...while still echoing it live", "ui.raw(text)" in _run_src)
+check("...and records the failure for /fix", "last_run" in _run_src)
+
+_tool = agent.Tool()
+_tool.code = "x"
+_frida = type("F", (), {"tool": _tool})()
+_tool.last_run = {"ok": False, "cases": [{"name": "you ran it", "ok": False,
+                                          "problems": ["exit 1"]}],
+                  "from_manual_run": True}
+_passed, _total, _good = ui.run_tally(_tool)
+check("a failed manual run shows in the tally",
+      (_passed, _total, _good) == (0, 1, False), str((_passed, _total, _good)))
+check("the next move after a failed run is /fix",
+      ui.next_moves(_tool)[0] == "fix", str(ui.next_moves(_tool)))
 
 print()
 if FAILURES:

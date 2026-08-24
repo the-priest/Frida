@@ -41,6 +41,7 @@ P = prompts.build(engine.DISTRO)
 
 STEP_AGREE = "Agree on the shape"
 STEP_PLAN = "Plan the build"
+STEP_DEPS = "Install what it needs"
 STEP_READ = "Read the code"
 STEP_RUN = "Run it for real"
 STEP_FIX = "Fix what the run found"
@@ -483,6 +484,33 @@ class Frida:
     # ----------------------------------------------------------------------
     # 4 · read the code (free, local)
     # ----------------------------------------------------------------------
+    def bring_deps(self, board):
+        """Install the packages the file imports, before anything tries to run it.
+
+        Nothing did this. A tool importing any third-party package therefore
+        failed static analysis, failed the real run, burned every fix round on
+        an error no edit could repair, and was installed on your PATH anyway —
+        where it died with ModuleNotFoundError the first time you typed its
+        name. /deps existed, but you had to already know that.
+        """
+        try:
+            missing = engine.missing_deps(self.tool.code)
+        except Exception:
+            missing = []
+        if not missing:
+            board.skip(STEP_DEPS, "standard library only")
+            return True
+        board.start(STEP_DEPS, "installing " + ", ".join(missing[:4])
+                    + ("…" if len(missing) > 4 else ""))
+        res = engine.install_deps(missing)
+        if res.get("ok"):
+            board.finish(STEP_DEPS, ", ".join(missing))
+            return True
+        # Not fatal: the run below will say exactly what is still missing, and
+        # a package that won't install is often a system one the user can add.
+        board.fail(STEP_DEPS, _short(res.get("log", "") or "install failed", 60))
+        return False
+
     def read_code(self, board):
         board.start(STEP_READ, "checking it over")
         ok, report, checks = engine.smoke_test(self.tool.code)
@@ -650,8 +678,8 @@ class Frida:
         """Take a sentence, hand back a working command. Returns the Tool."""
         self._attempt = 0
         write_step = "Write it"
-        board = ui.TaskBoard("", [STEP_AGREE, STEP_PLAN, write_step, STEP_READ,
-                                  STEP_RUN, STEP_FIX, STEP_SHIP])
+        board = ui.TaskBoard("", [STEP_AGREE, STEP_PLAN, write_step, STEP_DEPS,
+                                  STEP_READ, STEP_RUN, STEP_FIX, STEP_SHIP])
         board.show()
         # Commands typed at a question or the plan gate run while this call is
         # still on the stack; dispatch refuses the ones that would swap the
@@ -680,6 +708,7 @@ class Frida:
                     ui.say(_prose(built["reply"]))
                 return self.tool
 
+            self.bring_deps(board)
             passed, report = self.read_code(board)
             result = None
             if passed and not verify:
@@ -703,12 +732,21 @@ class Frida:
                         self._closing(built)
                         return self.tool
 
+            healthy = True
             if (not passed) or (result and not result["ok"]):
-                self.fix_loop(board, static_report=report, run_result=result)
+                healthy = self.fix_loop(board, static_report=report,
+                                        run_result=result)
             else:
                 board.skip(STEP_FIX, "nothing to fix")
 
-            delivered = self.hand_over(board, do_install=install)
+            # It used to install regardless and announce "ready". A tool that
+            # failed its checks, never ran, and burned every fix round is not
+            # ready — putting it on your PATH under that word is the exact
+            # quiet lie this program exists to catch. Save it, say so, and let
+            # /install be a decision you make.
+            delivered = self.hand_over(board, do_install=install and healthy)
+            if not healthy:
+                delivered["unhealthy"] = True
             board.close()
             self._closing(built, delivered)
             return self.tool
@@ -720,6 +758,17 @@ class Frida:
         reply = _prose(built["reply"]) if built else ""
         if reply:
             ui.say(reply)
+        if delivered and delivered.get("unhealthy"):
+            ui.blank()
+            ui.warn(self.tool.name + " still isn't working — not installed")
+            ui.note("the file is saved, and the conversation is intact")
+            ui.note("/test to see the failure · /review to read it · "
+                    "or tell me what to change")
+            if delivered.get("copy"):
+                ui.file_card(delivered["copy"], "saved",
+                             run_hint="python3 %s --help" % delivered["copy"])
+            self.cost_line()
+            return
         if delivered and delivered.get("installed"):
             inst = delivered["installed"]
             if ui.BIG_MODE:
@@ -766,7 +815,8 @@ class Frida:
     def iterate(self, instruction, verify=True, install=True):
         """A change to the tool that already exists."""
         step = "Change it"
-        board = ui.TaskBoard("", [step, STEP_READ, STEP_RUN, STEP_FIX, STEP_SHIP])
+        board = ui.TaskBoard("", [step, STEP_DEPS, STEP_READ, STEP_RUN,
+                                  STEP_FIX, STEP_SHIP])
         board.show()
         self.busy = True
         try:
@@ -788,6 +838,7 @@ class Frida:
                 board.close()
                 self._closing(built)
                 return
+            self.bring_deps(board)
             passed, report = self.read_code(board)
             result = self.run_for_real(board) if passed else None
             if (not passed) or (result and not result.get("ok") and not result.get("blocked")):

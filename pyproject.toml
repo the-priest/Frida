@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "frida-toolsmith"
-version = "2.5.0"
+version = "2.6.0"
 description = "Describe a command-line tool, get a working one. A terminal toolsmith with no GUI anywhere in it."
 readme = "README.md"
 requires-python = ">=3.10"

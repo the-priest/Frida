@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -3777,7 +3777,54 @@ PIP_ALIASES = {
     "docx": "python-docx", "fitz": "PyMuPDF", "sklearn": "scikit-learn",
     "git": "GitPython", "jwt": "PyJWT", "nmap": "python-nmap", "dns": "dnspython",
     "win32api": "pywin32", "zoneinfo": "", "toml": "tomli",
+    # Media and audio — a music player is one of the first things anyone asks
+    # for, and `pip install vlc` fetches a completely unrelated project.
+    "vlc": "python-vlc", "pygame": "pygame", "sounddevice": "sounddevice",
+    "soundfile": "soundfile", "pyaudio": "PyAudio", "simpleaudio": "simpleaudio",
+    "just_playback": "just_playback", "miniaudio": "miniaudio",
+    "audioread": "audioread", "eyed3": "eyeD3", "tinytag": "tinytag",
+    "PIL": "Pillow", "gi": "PyGObject", "cairo": "pycairo",
+    # Terminal and TUI
+    "blessed": "blessed", "readchar": "readchar", "getch": "py-getch",
+    "curses": "", "_curses": "",          # stdlib on POSIX, not a pip package
+    # Frequently mis-named elsewhere
+    "attr": "attrs", "pkg_resources": "setuptools", "google": "protobuf",
+    "lxml": "lxml", "Xlib": "python-xlib", "psycopg2": "psycopg2-binary",
+    "MySQLdb": "mysqlclient", "redis": "redis", "OpenGL": "PyOpenGL",
+    "speech_recognition": "SpeechRecognition", "telebot": "pyTelegramBotAPI",
+    "discord": "discord.py", "dotenv": "python-dotenv", "slugify": "python-slugify",
+    "ruamel": "ruamel.yaml", "pytz": "pytz", "tqdm": "tqdm",
 }
+
+
+def missing_deps(code):
+    """The declared pip packages that the tool's interpreter cannot import.
+
+    detect_deps says what the file imports; this says what is actually absent,
+    so a build doesn't reinstall half of Arch's python packages on every run.
+    """
+    wanted = detect_deps(code or "")["pip"]
+    if not wanted:
+        return []
+    tops = [t for t in _imported_tops(code or "")
+            if t and not t.startswith("_") and t not in _STDLIB]
+    by_pkg = {}
+    for top in tops:
+        pkg = PIP_ALIASES.get(top, top)
+        if pkg:
+            by_pkg.setdefault(pkg, top)
+    if not by_pkg:
+        return []
+    probe = ("import importlib.util,sys,json\n"
+             "print(json.dumps([m for m in sys.argv[1:] "
+             "if importlib.util.find_spec(m) is None]))")
+    try:
+        out = subprocess.run([run_python(), "-c", probe] + list(by_pkg.values()),
+                             capture_output=True, text=True, timeout=30)
+        absent = set(json.loads(out.stdout.strip() or "[]"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return sorted(wanted)          # can't tell — assume they're needed
+    return sorted(pkg for pkg, top in by_pkg.items() if top in absent)
 
 def detect_deps(code):
     """Third-party pip packages a generated tool imports.

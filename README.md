@@ -310,6 +310,33 @@ conversation grows and providers that cache prefixes still hit their cache.
 That matters: cached input on DeepSeek is roughly a fifth the price of fresh
 input, so saving tokens by rewriting history would have been a bad trade.
 
+### It installs what the tool needs
+
+A tool that imports `vlc` or `mutagen` used to fail static analysis, fail the
+run, burn every fix round on an error no edit could repair, get installed on
+your PATH regardless, and die with `ModuleNotFoundError` the first time you
+typed its name. Nothing ever installed the dependencies.
+
+Now the build has a step for it. Only genuinely-absent packages are installed —
+on Arch, Pillow and requests are usually already there as native packages, and
+reinstalling them is pure waste — and import names are mapped to real package
+names, because `pip install vlc` fetches an unrelated project. The right one is
+`python-vlc`.
+
+They go into Frida's own venv, created with system site-packages, so nothing is
+forced into your system Python.
+
+### It won't call broken code "ready"
+
+If the checks still fail after the fix rounds run out, the tool is **not**
+installed. It is saved, the conversation is kept, and Frida says plainly that
+it isn't working — rather than putting it on your PATH under the word "ready".
+`/install` is then a decision you make.
+
+And `/fix` works from a run you did yourself. `/run` tees stderr — echoing the
+traceback live while keeping it — so the crash you just watched is the thing
+`/fix` acts on, instead of "nothing to fix from, run /test first".
+
 ### Nothing you build is lost
 
 Every accepted change is a version. `/versions` lists them, `/undo` steps back,

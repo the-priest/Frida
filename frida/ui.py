@@ -695,18 +695,30 @@ class TaskBoard:
         self._live.start(self.render)
         return self
 
-    def close(self):
+    def close(self, interrupted=None):
+        """Stop drawing.
+
+        `interrupted` decides what an unfinished step becomes. Marking it DONE
+        was a green tick on work that never happened; marking it "stopped"
+        unconditionally was just as wrong, because the board is also closed
+        mid-build every time Frida pauses to ask you a question — which made
+        "Agree on the shape · stopped" appear right before it asked. When the
+        caller doesn't say, look at whether an exception is on its way up: that
+        is exactly the difference between abandoning the work and pausing it.
+        """
         if not self._running:
             return
         self._running = False
+        if interrupted is None:
+            interrupted = sys.exc_info()[0] is not None
         for t in self.tasks:
             if t["status"] == self.ACTIVE:
-                # This used to mark the step DONE — a green tick on work that
-                # was interrupted or that crashed. A checklist that ticks a step
-                # it did not finish is worse than no checklist.
-                t["status"] = self.SKIPPED
-                if not t["note"]:
-                    t["note"] = "stopped"
+                if interrupted:
+                    t["status"] = self.SKIPPED
+                    if not t["note"]:
+                        t["note"] = "stopped"
+                else:
+                    t["status"] = self.DONE
         self.stage = ""
         self.detail = ""
         self.preview = []

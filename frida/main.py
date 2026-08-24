@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import sys
 
 from . import agent, commands, engine, harness, ship, ui
@@ -284,18 +285,55 @@ def show_cost():
 
 
 def run_tool(f, argv):
+    """Run the tool for real, attached to your terminal, and remember how it went.
+
+    stdin and stdout stay wired to the terminal so an interactive tool actually
+    works. stderr is teed — echoed as it arrives AND kept — because that is
+    where the traceback goes, and /fix used to answer "nothing to fix from,
+    run /test first" immediately after showing you a crash it had just printed.
+    """
     if not f.tool.code:
         ui.err("no tool yet")
         return 1
     path = ship.save_copy(f.tool.code, f.tool.name)["path"]
     ui.rule(f"$ {f.tool.name} " + " ".join(argv))
+    captured = []
+    rc = 1
     try:
-        proc = subprocess.run([engine.run_python(), path] + list(argv))
-        rc = proc.returncode
+        proc = subprocess.Popen([engine.run_python(), path] + list(argv),
+                                stderr=subprocess.PIPE)
+
+        def _tee():
+            for line in iter(proc.stderr.readline, b""):
+                text = line.decode("utf-8", errors="replace")
+                captured.append(text)
+                ui.raw(text)
+        pump = threading.Thread(target=_tee, daemon=True)
+        pump.start()
+        rc = proc.wait()
+        pump.join(timeout=2)
     except KeyboardInterrupt:
         rc = 130
+    except OSError as exc:
+        ui.err(str(exc))
+        rc = 1
     ui.rule()
     (ui.ok if rc == 0 else ui.warn)(f"exit {rc}")
+
+    stderr = "".join(captured)
+    if rc not in (0, 130):
+        f.tool.last_run = {
+            "ok": False,
+            "cases": [{"name": "you ran it" + ((" " + " ".join(argv)) if argv else ""),
+                       "ok": False, "argv": list(argv),
+                       "run": {"exit": rc, "stdout": "", "stderr": stderr[-4000:],
+                               "seconds": 0.0, "timed_out": False},
+                       "problems": ["exit %d" % rc] + ([stderr.strip().splitlines()[-1]]
+                                                       if stderr.strip() else [])}],
+            "from_manual_run": True,
+        }
+        if stderr.strip():
+            ui.note("/fix will work from that")
     return rc
 
 

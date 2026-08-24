@@ -371,7 +371,7 @@ def h_fix(f, arg):
     from . import agent
     if not f.tool.last_run:
         ui.err("nothing to fix from")
-        ui.note("run /test first, then /fix works on what it found")
+        ui.note("run it (/run or /test) and /fix works on whatever failed")
         return None
     board = ui.TaskBoard("", [agent.STEP_FIX, agent.STEP_READ, agent.STEP_RUN])
     board.show()
