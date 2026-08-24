@@ -973,6 +973,71 @@ check("the default row is marked", ui.plain(_rows[1])[:6] != ui.plain(_rows[0])[
 check("long labels are clipped, not wrapped",
       all("\n" not in r for r in _rows))
 
+# ==========================================================================
+# 2.7.3 — bubbles: every block says what kind of thing it is
+# ==========================================================================
+def _capture(fn, *a, **k):
+    got, real = [], ui.out
+    ui.out = got.append
+    try:
+        fn(*a, **k)
+    finally:
+        ui.out = real
+    return [r for r in got if r.strip()]
+
+_w = ui.width
+try:
+    for W in (120, 92, 72, 60, 56):
+        ui.width = (lambda _w=W: (lambda default=80: _w))()
+        rows = []
+        rows += _capture(ui.bubble, "code", ["import sys", "x" * 300],
+                         title="t.py", meta="python \u00b7 9 lines", foot="/code")
+        rows += _capture(ui.bubble, "answer", ["hi"])
+        rows += _capture(ui.frame_open, "run", "$ x")
+        rows += _capture(ui.frame_close, "exit 0")
+        rows += _capture(ui.hairline)
+        widths = {ui.vlen(r) for r in rows}
+        check("every block is the same width at %d cols" % W,
+              len(widths) == 1, sorted(widths))
+        check("...and none of it overflows the terminal at %d cols" % W,
+              max(widths) <= W, max(widths))
+finally:
+    ui.width = _w
+
+check("each kind has a tag and a colour",
+      all(len(v) == 2 and v[0].isupper() for v in ui.KINDS.values()))
+_tags = _capture(ui.bubble, "error", ["boom"])
+check("the tag names the kind", "ERROR" in ui.plain(_tags[0]), ui.plain(_tags[0]))
+
+# the RUN frame has no side rails: a child process writes straight to the
+# terminal and cannot have every line prefixed.
+_run = _ins.getsource(ui.frame_open)
+check("frame_open draws a header only", "_bubble_top" in _run and "rail" not in _run)
+
+# bubbles must be switchable off, and must switch themselves off when there is
+# no room for them.
+check("/bubbles exists", commands.lookup("bubbles") is not None)
+_b = ui.bubbles_enabled()
+try:
+    ui.set_bubbles(False)
+    flat = _capture(ui.bubble, "code", ["import sys"], title="t.py")
+    check("bubbles off still labels the block", "CODE" in ui.plain(flat[0]), flat[0])
+    check("...without drawing a box", "\u256d" not in "".join(flat))
+    ui.set_bubbles(True)
+    ui.width = lambda default=80: 40
+    check("a narrow terminal disables them by itself", not ui.bubbles_enabled())
+finally:
+    ui.width = _w
+    ui.set_bubbles(_b)
+
+# say() must tag the speaker once per reply, not once per paragraph
+_said = _capture(ui.say, "one\n\n```python\nx = 1\n```\n\ntwo")
+check("the speaker is named once per reply",
+      sum(1 for r in _said if "frida" in ui.plain(r)) == 1,
+      [ui.plain(r) for r in _said if "frida" in ui.plain(r)])
+check("...and the code got its own bubble",
+      any("CODE" in ui.plain(r) for r in _said))
+
 print()
 if FAILURES:
     print(f"something failed: {len(FAILURES)}")

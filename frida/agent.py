@@ -411,16 +411,16 @@ class Frida:
     def show_plan(self, plan, board):
         """Show it and, unless auto, let the user redirect before anything is built."""
         board.close()
-        ui.rule("the plan")
-        ui.blank()
-        ui.out("  " + ui.c("amber", plan["name"], bold=True) +
-               (("  " + ui.c("grey", plan["summary"])) if plan["summary"] else ""))
-        ui.blank()
+        rows = [ui.c("amber", plan["name"], bold=True) +
+                (("  " + ui.c("grey", plan["summary"])) if plan["summary"] else "")]
+        if plan["tasks"] or plan["risks"]:
+            rows.append("")
         for t in plan["tasks"]:
-            ui.out("    " + ui.c("faint", ui.G.bullet) + " " + ui.c("cream", t))
+            rows.append("  " + ui.c("faint", ui.G.bullet) + " " + ui.c("cream", t))
         for r in plan["risks"]:
-            ui.out("    " + ui.c("amber", "! ") + ui.c("grey", r))
-        ui.blank()
+            rows.append("  " + ui.c("amber", "!") + " " + ui.c("grey", r))
+        ui.bubble("plan", rows, meta="%d steps" % len(plan["tasks"]),
+                  foot="" if self.auto else "enter to build it \u00b7 or say what to change")
         if self.auto:
             board.show()
             return True

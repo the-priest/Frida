@@ -358,7 +358,8 @@ def run_tool(f, argv):
         ui.err("no tool yet")
         return 1
     path = ship.save_copy(f.tool.code, f.tool.name)["path"]
-    ui.rule(f"$ {f.tool.name} " + " ".join(argv))
+    ui.frame_open("run", "$ " + f.tool.name + (" " + " ".join(argv) if argv else ""),
+                  meta="attached to your terminal")
     captured = []
     rc = 1
     try:
@@ -379,11 +380,13 @@ def run_tool(f, argv):
     except OSError as exc:
         ui.err(str(exc))
         rc = 1
-    ui.rule()
+    # The footer of the RUN frame carries the exit code, so the result is part
+    # of the block it belongs to rather than a loose line underneath it.
     if rc == 0:
-        ui.ok("exit 0")
+        ui.frame_close(ui.c("lime", ui.G.done + " exit 0"))
     else:
-        ui.warn("exit %d%s" % (rc, EXIT_MEANING.get(rc, "")))
+        ui.frame_close(ui.c("red" if rc not in (2, 130) else "amber",
+                            "%s exit %d%s" % (ui.G.fail, rc, EXIT_MEANING.get(rc, ""))))
 
     stderr = "".join(captured)
     if rc not in (0, 130):

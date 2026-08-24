@@ -835,6 +835,22 @@ def h_help(f, arg):
     return None
 
 
+@command("bubbles", "boxed blocks on or off", group="session", arg="[on|off]")
+def h_bubbles(f, arg):
+    want = (arg or "").strip().lower()
+    if want in ("off", "no", "0", "plain"):
+        ui.set_bubbles(False)
+    elif want in ("on", "yes", "1", ""):
+        ui.set_bubbles(not ui.bubbles_enabled() if not want else True)
+    else:
+        ui.err("say /bubbles on or /bubbles off")
+        return None
+    ui.ok("bubbles " + ("on" if ui.bubbles_enabled() else "off"))
+    if ui.bubbles_enabled() and ui.width() < 56:
+        ui.note("this terminal is too narrow for them — still drawing flat")
+    return None
+
+
 @command("clear", "clear the screen", group="session", aliases=("cls",))
 def h_clear(f, arg):
     if ui.is_tty():

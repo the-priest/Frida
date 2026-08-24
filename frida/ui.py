@@ -813,8 +813,131 @@ class TaskBoard:
 
 
 # ==========================================================================
-# PANELS
+# BUBBLES  --  every block of output says what kind of thing it is
 # ==========================================================================
+# A terminal session is one undifferentiated column of text. You cannot tell,
+# at a glance, whether you are looking at the model talking, the code it wrote,
+# or the output of running it — they are all just lines. A bubble gives each
+# block a border and a tag, so the shape and the colour tell you what it is
+# before you have read a word of it.
+#
+# Two forms, because they solve different problems:
+#   bubble()      — a closed box. For content Frida owns and can measure.
+#   frame_open()  — header and footer only, no side rails. For content a CHILD
+#                   PROCESS writes straight to the terminal, where prefixing
+#                   every line is not possible.
+
+KINDS = {
+    "answer":  ("ANSWER",   "violet"),
+    "think":   ("THINKING", "violet"),
+    "plan":    ("PLAN",     "gold"),
+    "code":    ("CODE",     "amber"),
+    "diff":    ("DIFF",     "amber"),
+    "run":     ("RUN",      "teal"),
+    "output":  ("OUTPUT",   "teal"),
+    "error":   ("ERROR",    "red"),
+    "shipped": ("SHIPPED",  "lime"),
+    "choose":  ("CHOOSE",   "violet"),
+    "note":    ("NOTE",     "grey"),
+}
+
+_BUBBLES = [True]
+
+
+def set_bubbles(on):
+    """Bubbles off falls back to flat lines — for narrow terminals, or taste."""
+    _BUBBLES[0] = bool(on)
+
+
+def bubbles_enabled():
+    return _BUBBLES[0] and width() >= 56
+
+
+def _tag(kind):
+    label, colour = KINDS.get(kind, (kind.upper(), "grey"))
+    return badge(label, colour), colour
+
+
+def _bubble_top(kind, title="", meta="", w=None):
+    w = w or width() - 4
+    tag, colour = _tag(kind)
+    head = c("faint", G.tl + G.h) + " " + tag
+    if title:
+        head += " " + c(colour, title, bold=True)
+    used = vlen(head)
+    tail = (c("faint", " " + meta) if meta else "")
+    # head + ' ' + fill [+ tail + ' '] + corner  ==  w
+    if not tail:
+        room = w - used - 2
+        return head + " " + c("faint", G.h * max(1, room)) + c("faint", G.tr)
+    room = w - used - vlen(tail) - 3
+    if room < 1:
+        tail, room = "", w - used - 2
+        return head + " " + c("faint", G.h * max(1, room)) + c("faint", G.tr)
+    return head + " " + c("faint", G.h * max(1, room)) + tail + " " + c("faint", G.tr)
+
+
+def _bubble_bottom(foot="", w=None):
+    w = w or width() - 4
+    if not foot:
+        return c("faint", G.bl + G.h * (w - 2) + G.br)
+    body = " " + foot + " "
+    room = w - 2 - vlen(body) - 1
+    return (c("faint", G.bl + G.h) + body + c("faint", G.h * max(1, room) + G.br))
+
+
+def bubble(kind, lines, title="", meta="", foot="", pad=True):
+    """A closed, tagged box around lines we control the width of."""
+    rows = lines.split("\n") if isinstance(lines, str) else list(lines)
+    if not any(plain(r).strip() for r in rows):
+        return
+    if not bubbles_enabled():
+        label, colour = KINDS.get(kind, (kind.upper(), "grey"))
+        blank()
+        out("  " + c(colour, label, bold=True) + (("  " + title) if title else ""))
+        for r in rows:
+            out("  " + r)
+        blank()
+        return
+    w = width() - 4
+    inner = w - 4
+    rail = c("faint", G.v)
+    blank()
+    out(MARGIN + _bubble_top(kind, title, meta, w))
+    if pad:
+        out(MARGIN + rail + " " * (w - 2) + rail)
+    for r in rows:
+        body = r.replace("\t", "    ")
+        if vlen(body) > inner:
+            body = clip(body, inner - 1) + c("faint", "\u2026")
+        out(MARGIN + rail + " " + body + " " * max(0, inner - vlen(body)) + " " + rail)
+    if pad:
+        out(MARGIN + rail + " " * (w - 2) + rail)
+    out(MARGIN + _bubble_bottom(foot, w))
+    blank()
+
+
+def frame_open(kind, title="", meta=""):
+    """Header for a block whose body is written by something else."""
+    blank()
+    if not bubbles_enabled():
+        label, colour = KINDS.get(kind, (kind.upper(), "grey"))
+        out(MARGIN + c(colour, label, bold=True) + (("  " + title) if title else ""))
+        return
+    out(MARGIN + _bubble_top(kind, title, meta))
+
+
+def frame_close(foot=""):
+    if not bubbles_enabled():
+        if foot:
+            out("  " + foot)
+        blank()
+        return
+    out(MARGIN + _bubble_bottom(foot))
+    blank()
+
+
+
 def panel(body, title="", colour="teal", pad=1):
     w = width()
     inner = w - 4
@@ -835,67 +958,59 @@ _LANG_LABEL = {"py": "python", "js": "javascript", "sh": "shell", "": "text"}
 
 
 def code_card(source, lang="", peek=14, path=""):
-    """A fenced block from a reply, rendered as a card instead of as prose.
+    """A fenced block from a reply, as a tagged CODE bubble.
 
     Code inside a model's message used to go through wrap(), which splits on
     whitespace — so every level of indentation was destroyed and a 200-line
     tool arrived as a flat, unreadable wall. Code is not prose and does not get
-    wrapped: it gets a rail, a gutter, and a fold.
+    wrapped: it gets a gutter, a fold, and a border with its language on it.
     """
     body = (source or "").rstrip("\n")
     if not body.strip():
         return
     lines = body.split("\n")
-    label = path or _LANG_LABEL.get(lang, lang or "text")
-    room = max(24, width() - 12)
-
     shown = lines[:peek] if peek and len(lines) > peek else lines
-    painted = highlight("\n".join(shown)).split("\n") if lang in ("python", "py", "") \
-        else shown
+    painted = highlight("\n".join(shown)).split("\n") \
+        if lang in ("python", "py", "") else shown
+    if len(painted) != len(shown):
+        painted = shown
     gutter = len(str(len(lines)))
-    rail = c("faint", G.v)
-
-    blank()
-    out("    " + c("faint", G.tl + G.h) + c("teal", f" {label} ") +
-        c("faint", G.h * 2) + c("faint", f" {len(lines)} lines"))
-    for i, line in enumerate(painted, 1):
-        text = line.replace("\t", "    ")
-        if vlen(text) > room:
-            text = clip(text, room) + c("faint", "…")
-        out("    " + c("faint", str(i).rjust(gutter)) + " " + rail + " " + text)
-    if len(lines) > len(shown):
-        out("    " + " " * gutter + " " + rail + " " +
-            c("faint", f"{G.dot * 3}  {len(lines) - len(shown)} more lines"))
-    out("    " + c("faint", G.bl + G.h * 2) + c("faint", " /code for all of it"))
-    blank()
+    rows = [c("faint", str(i).rjust(gutter) + " " + G.v + " ") + t.replace("\t", "    ")
+            for i, t in enumerate(painted, 1)]
+    hidden = len(lines) - len(shown)
+    if hidden:
+        rows.append(c("faint", " " * gutter + " " + G.v + " " +
+                      "%s  %d more lines" % (G.dot * 3, hidden)))
+    label = _LANG_LABEL.get(lang, lang or "text")
+    bubble("code", rows,
+           title=path or "",
+           meta="%s · %d lines" % (label, len(lines)),
+           foot="/code for all of it" if hidden else "",
+           pad=False)
 
 
 def say(text, who="frida"):
-    """The model talking. Distinct from Frida's own chrome.
+    """The model talking, in an ANSWER bubble; its code in CODE bubbles.
 
-    Prose is wrapped; fenced code is handed to code_card. Splitting here means
-    that even when a reply carries code Frida didn't expect, the screen stays
-    readable instead of filling with un-indented source.
+    Splitting here means that even when a reply carries code Frida didn't
+    expect, the screen stays readable instead of filling with un-indented
+    source — and you can tell at a glance which part is which.
     """
     from .engine import split_fences
 
-    blank()
-    out("  " + c("violet", who, bold=True))
     segments = split_fences(text) or [("prose", text or "")]
+    first = True
     for seg in segments:
         if seg[0] == "code":
             code_card(seg[2], seg[1])
             continue
-        rendered = wrap(_light_markdown(seg[1].strip()), indent=2).split("\n")
-        if not any(l.strip() for l in rendered):
+        body = seg[1].strip()
+        if not body:
             continue
-        if motion_enabled() and sum(len(x) for x in rendered) < 400:
-            for line in rendered:
-                _type_line(line)
-        else:
-            for line in rendered:
-                out(line)
-    blank()
+        inner = width() - 10
+        rendered = wrap(_light_markdown(body), w=inner).split("\n")
+        bubble("answer", rendered, meta=who if first else "")
+        first = False
 
 
 def _type_line(line, cps=1400):
@@ -1249,16 +1364,12 @@ def file_card(path, label="written", run_hint="", extra=None):
     except OSError:
         size = 0
     human = f"{size} B" if size < 1024 else f"{size / 1024:.1f} KB"
-    rail = c("faint", G.v)
-    blank()
-    out("  " + c("lime", G.done) + "  " + c("cream", label, bold=True) +
-        c("faint", "   " + human))
-    out("  " + rail + "  " + c("teal", str(path)))
+    rows = [c("teal", str(path))]
     if run_hint:
-        out("  " + rail + "  " + c("faint", "run it  ") + c("gold", run_hint))
+        rows.append(c("faint", "run it  ") + c("gold", run_hint))
     for line in (extra or []):
-        out("  " + rail + "  " + c("faint", line))
-    blank()
+        rows.append(c("faint", line))
+    bubble("shipped", rows, title=label, meta=human, pad=False)
 
 
 def kv(pairs, indent=2):
@@ -1281,7 +1392,7 @@ def bar(label, value, total, colour="amber", cells=24):
 # ==========================================================================
 def _gradient_rule(width=None, left="amber", right="teal"):
     """A hairline that fades from one colour to the other on truecolor terminals."""
-    w = (width or globals()["width"]()) - 2
+    w = (width or globals()["width"]()) - 4
     if w < 8:
         return ""
     if DEPTH < 8:
