@@ -884,6 +884,53 @@ check("tkinter has an install hint", bool(engine.tk_install_hint()))
 check("...that is never 'pip install tkinter'",
       "pip" not in engine.tk_install_hint().lower(), engine.tk_install_hint())
 
+# ==========================================================================
+# 2.7.1 — a reply whose CODE contains a markdown fence
+# ==========================================================================
+# gameforge, a tool that parses markdown, had `line.startswith("```")` in its
+# source. The old ```...``` regex in _prose closed on that inner fence and
+# returned the rest of the file as prose, so ui.say() wrapped 200 lines of
+# Python as if it were text — indentation gone, mid-token start. Three times.
+_nested = (
+    "I built gameforge.\n\n```python\n"
+    "import sys\n"
+    "def blocks(t):\n"
+    "    for line in t.splitlines():\n"
+    '        if line.startswith("```"):\n'
+    "            return 1\n"
+    "```\n\nTry --help."
+)
+_p = agent._prose(_nested)
+check("prose stops at the real closing fence", _p == "I built gameforge.\n\nTry --help.", _p)
+check("...so no source leaks into the prose", "splitlines" not in _p)
+check("...and the fence markers go with it", "```" not in _p)
+
+_segs = engine.split_fences(_nested)
+check("the block is still recoverable", any(s[0] == "code" for s in _segs))
+_code = [s for s in _segs if s[0] == "code"][0][2]
+check("...whole, not truncated at the inner fence", "return 1" in _code, _code)
+check("...and it still parses", engine.parses(_code))
+check("an unterminated fence does not swallow the reply",
+      "before" in engine.strip_code_blocks("before\n\n```python\nx = 1\n"))
+check("history collapse is fence-aware too",
+      "_CODE_FENCE" not in _ins.getsource(engine.trim_history))
+
+# say() must not put code through wrap(), which splits on whitespace and so
+# destroys every level of indentation.
+_say_src = _ins.getsource(ui.say)
+check("say() splits fences before wrapping", "split_fences" in _say_src)
+check("...and hands code to the card", "code_card" in _say_src)
+# (the docstring names wrap() on purpose, so check the body after it)
+_card_body = _ins.getsource(ui.code_card).split('"""')[-1]
+check("the card never calls wrap()", "wrap(" not in _card_body, _card_body[:80])
+
+# /fix on a run with no recorded fault used to draw three empty checkboxes and
+# return in silence. Exit 2 with no args is CORRECT, not a fault.
+_fix_src = _ins.getsource(commands.h_fix)
+check("/fix checks for real problems before drawing a board",
+      _fix_src.index("problems_for_model") < _fix_src.index("TaskBoard"))
+check("...and says so when there are none", "nothing to fix" in _fix_src)
+
 print()
 if FAILURES:
     print(f"something failed: {len(FAILURES)}")

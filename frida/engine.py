@@ -67,7 +67,7 @@ from pathlib import Path
 
 import http.client            # IncompleteRead / RemoteDisconnected are retryable
 
-__version__ = "2.7.0"
+__version__ = "2.7.1"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -1565,8 +1565,6 @@ def context_budget_chars(model):
 def _msg_len(m):
     return len(m.get("content", "") or "")
 
-# matches a fenced code block so we can collapse superseded copies
-_CODE_FENCE = re.compile(r"```[a-zA-Z0-9_+-]*\n.*?```", re.S)
 
 def trim_history(messages, model=None):
     """Keep a long build conversation under the ACTIVE model's window without losing
@@ -1597,8 +1595,10 @@ def trim_history(messages, model=None):
                 continue
             m = body[i]
             if m.get("role") == "assistant" and "```" in (m.get("content") or ""):
-                collapsed = _CODE_FENCE.sub("`[earlier version of the code — superseded by the latest below]`",
-                                            m["content"])
+                # fence-aware: the old regex closed on a ``` inside the code
+                collapsed = strip_code_blocks(
+                    m["content"],
+                    "`[earlier version of the code \u2014 superseded by the latest below]`")
                 body[i] = {"role": m["role"], "content": collapsed}
 
     # ---- stage 1b: collapse OLD attached files -------------------------------
@@ -1618,9 +1618,10 @@ def trim_history(messages, model=None):
                 continue
             c = body[i].get("content") or ""
             if "```" in c and len(c) > 4000:
-                body[i] = {"role": "user", "content": _CODE_FENCE.sub(
-                    "`[an attached file the user shared earlier — omitted here to save "
-                    "context; ask for it again if you need it]`", c)}
+                body[i] = {"role": "user", "content": strip_code_blocks(
+                    c,
+                    "`[an attached file the user shared earlier \u2014 omitted here to save "
+                    "context; ask for it again if you need it]`")}
 
     sys_len = sum(_msg_len(m) for m in system)
     budget  = budget_total - sys_len
@@ -2287,6 +2288,52 @@ def _code_spans(reply):
             spans.append((lang, end + 1, len(reply), ticks, []))
             break
     return spans
+
+def split_fences(reply):
+    """Split a reply into [("prose", text) | ("code", lang, body)] segments.
+
+    Uses the same fence-length-aware scan as extract_code, so a tool whose own
+    source contains a markdown fence — `line.startswith("```")`, a --help string
+    with a fenced example — no longer ends the block early. The naive
+    ```...``` regex closed on that INNER fence and handed everything after it
+    back as prose, which is how a whole 200-line tool ended up wrapped and
+    un-indented in the chat.
+    """
+    reply = reply or ""
+    marks = list(_FENCE.finditer(reply))
+    segs, i, cursor = [], 0, 0
+    while i < len(marks):
+        opener = marks[i]
+        ticks, lang = len(opener.group(2)), (opener.group(3) or "").lower()
+        closer = None
+        for j in range(i + 1, len(marks)):
+            if len(marks[j].group(2)) >= ticks and not marks[j].group(3):
+                closer = marks[j]
+                i = j + 1
+                break
+        if closer is None:
+            body_end, next_cursor, i = len(reply), len(reply), len(marks)
+        else:
+            body_end, next_cursor = closer.start(), closer.end()
+        before = reply[cursor:opener.start()]
+        if before.strip():
+            segs.append(("prose", before))
+        segs.append(("code", lang, reply[opener.end() + 1:body_end]))
+        cursor = next_cursor
+    tail = reply[cursor:]
+    if tail.strip():
+        segs.append(("prose", tail))
+    return segs
+
+
+def strip_code_blocks(reply, placeholder=""):
+    """The reply with every fenced block removed or replaced."""
+    parts = []
+    for seg in split_fences(reply):
+        parts.append(seg[1] if seg[0] == "prose" else placeholder)
+    text = "".join(parts)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
 
 def _parses(text):
     import ast

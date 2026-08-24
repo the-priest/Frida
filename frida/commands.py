@@ -377,10 +377,22 @@ def h_test(f, arg):
 @command("fix", "feed the last failing run back and patch it", group="shape",
          needs_tool=True)
 def h_fix(f, arg):
-    from . import agent
+    from . import agent, harness
     if not f.tool.last_run:
         ui.err("nothing to fix from")
         ui.note("run it (/run or /test) and /fix works on whatever failed")
+        return None
+    # A non-zero exit is not automatically a fault. A bare run that exits 2
+    # because required arguments are missing is the tool behaving CORRECTLY,
+    # so the harness records no problem for it — and /fix used to respond to
+    # that by drawing three empty checkboxes and returning in silence.
+    if not harness.problems_for_model(f.tool.last_run):
+        code = f.tool.last_run.get("exit")
+        ui.info("nothing to fix — that run showed correct behaviour")
+        if code == 2:
+            ui.note("exit 2 with no arguments is what a well-behaved CLI does")
+        ui.note("to exercise it properly: /run " + (f.tool.args or "<args>"))
+        ui.note("or say what you want changed and I'll change it")
         return None
     board = ui.TaskBoard("", [agent.STEP_FIX, agent.STEP_READ, agent.STEP_RUN])
     board.show()

@@ -1031,10 +1031,13 @@ def _name_from_request(request):
 
 
 def _prose(reply):
-    """The model's message with its code block taken out."""
-    text = re.sub(r"```[a-zA-Z0-9_+-]*\n.*?```", "", reply or "", flags=re.S)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text
+    """The model's message with its code blocks taken out.
+
+    Fence-aware: see engine.split_fences. The old regex here closed on the
+    first ``` it found, including one inside a string literal in the tool's
+    own source, and returned the rest of the file as prose.
+    """
+    return engine.strip_code_blocks(reply or "")
 
 
 def _short(text, limit=60):

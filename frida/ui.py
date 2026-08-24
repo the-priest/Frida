@@ -681,9 +681,16 @@ class TaskBoard:
                     rail = c("faint", G.v)
                     if self.preview_label:
                         lines.append("      " + rail + c("faint", " " + self.preview_label))
-                    for pl in self.preview:
-                        body = pl.rstrip().replace("\t", "    ")[:room]
-                        lines.append("      " + rail + " " + c("grey", body))
+                    # Highlight the tail as it arrives. A tail almost always
+                    # starts mid-block, so tokenize will often refuse it —
+                    # highlight() hands back plain text in that case, which is
+                    # exactly the old behaviour rather than a crash.
+                    rows = [pl.rstrip().replace("\t", "    ")[:room] for pl in self.preview]
+                    painted = highlight("\n".join(rows)).split("\n")
+                    if len(painted) != len(rows):
+                        painted = [c("grey", r) for r in rows]
+                    for body in painted:
+                        lines.append("      " + rail + " " + body)
         return lines
 
     # ---- lifecycle ------------------------------------------------------
@@ -752,17 +759,70 @@ def panel(body, title="", colour="teal", pad=1):
     out(c("faint", G.bl + G.h * (w - 2) + G.br))
 
 
+_LANG_LABEL = {"py": "python", "js": "javascript", "sh": "shell", "": "text"}
+
+
+def code_card(source, lang="", peek=14, path=""):
+    """A fenced block from a reply, rendered as a card instead of as prose.
+
+    Code inside a model's message used to go through wrap(), which splits on
+    whitespace — so every level of indentation was destroyed and a 200-line
+    tool arrived as a flat, unreadable wall. Code is not prose and does not get
+    wrapped: it gets a rail, a gutter, and a fold.
+    """
+    body = (source or "").rstrip("\n")
+    if not body.strip():
+        return
+    lines = body.split("\n")
+    label = path or _LANG_LABEL.get(lang, lang or "text")
+    room = max(24, width() - 12)
+
+    shown = lines[:peek] if peek and len(lines) > peek else lines
+    painted = highlight("\n".join(shown)).split("\n") if lang in ("python", "py", "") \
+        else shown
+    gutter = len(str(len(lines)))
+    rail = c("faint", G.v)
+
+    blank()
+    out("    " + c("faint", G.tl + G.h) + c("teal", f" {label} ") +
+        c("faint", G.h * 2) + c("faint", f" {len(lines)} lines"))
+    for i, line in enumerate(painted, 1):
+        text = line.replace("\t", "    ")
+        if vlen(text) > room:
+            text = clip(text, room) + c("faint", "…")
+        out("    " + c("faint", str(i).rjust(gutter)) + " " + rail + " " + text)
+    if len(lines) > len(shown):
+        out("    " + " " * gutter + " " + rail + " " +
+            c("faint", f"{G.dot * 3}  {len(lines) - len(shown)} more lines"))
+    out("    " + c("faint", G.bl + G.h * 2) + c("faint", " /code for all of it"))
+    blank()
+
+
 def say(text, who="frida"):
-    """The model talking. Distinct from Frida's own chrome."""
+    """The model talking. Distinct from Frida's own chrome.
+
+    Prose is wrapped; fenced code is handed to code_card. Splitting here means
+    that even when a reply carries code Frida didn't expect, the screen stays
+    readable instead of filling with un-indented source.
+    """
+    from .engine import split_fences
+
     blank()
     out("  " + c("violet", who, bold=True))
-    rendered = wrap(_light_markdown(text), indent=2).split("\n")
-    if motion_enabled() and sum(len(x) for x in rendered) < 400:
-        for line in rendered:
-            _type_line(line)
-    else:
-        for line in rendered:
-            out(line)
+    segments = split_fences(text) or [("prose", text or "")]
+    for seg in segments:
+        if seg[0] == "code":
+            code_card(seg[2], seg[1])
+            continue
+        rendered = wrap(_light_markdown(seg[1].strip()), indent=2).split("\n")
+        if not any(l.strip() for l in rendered):
+            continue
+        if motion_enabled() and sum(len(x) for x in rendered) < 400:
+            for line in rendered:
+                _type_line(line)
+        else:
+            for line in rendered:
+                out(line)
     blank()
 
 
